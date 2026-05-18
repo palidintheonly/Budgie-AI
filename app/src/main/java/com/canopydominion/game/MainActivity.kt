@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -50,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -57,7 +60,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlin.math.PI
 import kotlin.math.cos
-import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
 
@@ -79,7 +81,7 @@ private val Bark = Color(0xFF81522D)
 private val Soil = Color(0xFF4A3524)
 private val Night = Color(0xFF101914)
 private val Panel = Color(0xFF18251E)
-private val River = Color(0xFF4AA3B5)
+private val RiverBlue = Color(0xFF4AA3B5)
 private val Threat = Color(0xFFCF6B5A)
 
 @Composable
@@ -88,7 +90,7 @@ private fun CanopyTheme(content: @Composable () -> Unit) {
         colorScheme = darkColorScheme(
             primary = Banana,
             secondary = CanopyGreen,
-            tertiary = River,
+            tertiary = RiverBlue,
             background = Night,
             surface = Panel,
             onPrimary = Night,
@@ -103,7 +105,7 @@ private fun CanopyTheme(content: @Composable () -> Unit) {
 enum class Terrain(val label: String, val color: Color, val food: Int, val wood: Int, val lore: Int) {
     Grove("Grove", Color(0xFF2F7D58), 3, 1, 0),
     Jungle("Jungle", Color(0xFF276043), 2, 3, 1),
-    River("River", River, 2, 0, 2),
+    River("River", RiverBlue, 2, 0, 2),
     Hill("Hill", Color(0xFF8C7650), 0, 2, 2),
     Ruin("Ruin", Color(0xFF8B6A9B), 0, 1, 4),
     Thorn("Thorn", Color(0xFF5F3C36), 1, 1, 0)
@@ -469,14 +471,14 @@ private fun Header(state: GameState) {
         ) {
             Column {
                 Text("Canopy Dominion", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                Text("Turn ${state.turn} · offline monkey 4X", color = Color(0xFFB8C8B2))
+                Text("Turn ${state.turn} - offline monkey 4X", color = Color(0xFFB8C8B2))
             }
             Text("Troop ${state.troop}", color = Banana, fontWeight = FontWeight.Bold)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             ResourcePill("Bananas", state.bananas, Banana, Modifier.weight(1f))
             ResourcePill("Timber", state.timber, Bark, Modifier.weight(1f))
-            ResourcePill("Lore", state.lore, River, Modifier.weight(1f))
+            ResourcePill("Lore", state.lore, RiverBlue, Modifier.weight(1f))
         }
     }
 }
@@ -648,7 +650,24 @@ private fun IslandScreen(
 @Composable
 private fun HexMap(state: GameState, modifier: Modifier = Modifier, onSelect: (Int) -> Unit) {
     Box(modifier = modifier) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(state.tiles) {
+                    detectTapGestures { tap ->
+                        val radius = minOf(size.width, size.height) / 15.2f
+                        val center = Offset(size.width / 2f, size.height / 2f)
+                        val nearest = state.tiles.minBy { tile ->
+                            val x = center.x + radius * 1.72f * (tile.q + tile.r / 2f)
+                            val y = center.y + radius * 1.5f * tile.r
+                            val dx = tap.x - x
+                            val dy = tap.y - y
+                            dx * dx + dy * dy
+                        }
+                        onSelect(nearest.id)
+                    }
+                }
+        ) {
             val radius = size.minDimension / 15.2f
             val center = Offset(size.width / 2f, size.height / 2f)
             state.tiles.forEach { tile ->
@@ -656,21 +675,6 @@ private fun HexMap(state: GameState, modifier: Modifier = Modifier, onSelect: (I
                 val y = center.y + radius * 1.5f * tile.r
                 drawHex(tile, Offset(x, y), radius, tile.id == state.selectedTile)
             }
-        }
-        state.tiles.forEach { tile ->
-            val radius = 1f / 15.2f
-            val x = 0.5f + radius * 1.72f * (tile.q + tile.r / 2f)
-            val y = 0.5f + radius * 1.5f * tile.r
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(
-                        start = ((x * 100).coerceIn(0f, 92f)).dp,
-                        top = ((y * 100).coerceIn(0f, 92f)).dp
-                    )
-                    .size(42.dp)
-                    .clickable { onSelect(tile.id) }
-            )
         }
     }
 }
@@ -711,7 +715,7 @@ private fun SelectedTilePanel(state: GameState, onScout: () -> Unit, onSettle: (
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
                     Text(if (tile.explored) tile.terrain.label else "Unknown Canopy", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    Text("Owner: ${tile.owner.readable()}${tile.settlement?.let { " · $it" } ?: ""}", color = Color(0xFFB8C8B2))
+                    Text("Owner: ${tile.owner.readable()}${tile.settlement?.let { " - $it" } ?: ""}", color = Color(0xFFB8C8B2))
                 }
                 Text("F${tile.terrain.food} W${tile.terrain.wood} L${tile.terrain.lore}", color = Banana, fontWeight = FontWeight.Bold)
             }
@@ -749,7 +753,7 @@ private fun TribesScreen(state: GameState, onResearch: () -> Unit) {
                     Text("Research", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
                     Text("Current level ${state.research}. Spend lore to improve your tribe economy and defense.", color = Color(0xFFB8C8B2))
                     Button(onClick = onResearch, shape = RoundedCornerShape(8.dp)) {
-                        Text("Teach Trick · 6 lore")
+                        Text("Teach Trick - 6 lore")
                     }
                 }
             }
@@ -782,7 +786,7 @@ private fun RivalCard(rival: Rival) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(rival.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
                 Text(rival.plan, color = Color(0xFFB8C8B2))
-                Text("Power ${rival.power} · Mood ${rival.mood}", color = Banana, style = MaterialTheme.typography.bodySmall)
+                Text("Power ${rival.power} - Mood ${rival.mood}", color = Banana, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
