@@ -22,11 +22,13 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.2-alpha"
+        versionName = "0.0.3"
+        manifestPlaceholders["appLabel"] = "Monkey Mischief"
     }
 
     buildFeatures {
         compose = true
+        resValues = true
     }
 
     signingConfigs {
@@ -41,11 +43,29 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            manifestPlaceholders["appLabel"] = "Monkey Mischief Debug"
+        }
         release {
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
             }
             isMinifyEnabled = false
+            manifestPlaceholders["appLabel"] = "Monkey Mischief"
+        }
+        create("alpha") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".alpha"
+            versionNameSuffix = "-alpha"
+            manifestPlaceholders["appLabel"] = "Monkey Mischief Alpha"
+        }
+        create("beta") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".beta"
+            versionNameSuffix = "-beta"
+            manifestPlaceholders["appLabel"] = "Monkey Mischief Beta"
         }
     }
 }

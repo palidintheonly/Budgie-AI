@@ -176,8 +176,8 @@ data class GameState(
     val bananas: Int = 8,
     val phase: RoundPhase = RoundPhase.PlayerChoice,
     val lastPlayerAction: String = "Choose a battle command.",
-    val lastAiAction: String = "Rival trainer is watching your troop.",
-    val log: List<String> = listOf("A rival troop challenges the Elder Fig.")
+    val lastAiAction: String = "The Naughty Knuckles are watching your troop.",
+    val log: List<String> = listOf("The Naughty Knuckles challenge the Elder Fig.")
 )
 
 class GameViewModel : ViewModel() {
@@ -257,7 +257,7 @@ class GameViewModel : ViewModel() {
         state = working.copy(
             phase = phase,
             lastPlayerAction = events.firstOrNull { it.startsWith("You") } ?: "You hold position.",
-            lastAiAction = events.firstOrNull { it.startsWith("Rival") } ?: "Rival waits.",
+            lastAiAction = events.firstOrNull { it.startsWith(working.ai.name) } ?: "${working.ai.name} waits.",
             log = (events + resultLine + working.log).take(12)
         )
     }
@@ -374,7 +374,7 @@ private fun autoPromoteDowned(state: GameState, events: MutableList<String>): Ga
     }
     return state.copy(
         player = promote(state.player, "You"),
-        ai = promote(state.ai, "Rival")
+        ai = promote(state.ai, state.ai.name)
     )
 }
 
@@ -409,7 +409,7 @@ private inline fun <T> List<T>.indexOfFirstIndexed(predicate: (Int, T) -> Boolea
     return -1
 }
 
-private fun Actor.label(): String = if (this == Actor.Player) "You" else "Rival"
+private fun Actor.label(): String = if (this == Actor.Player) "You" else "Naughty Knuckles"
 
 private fun initialPlayer() = Trainer(
     name = "You",
@@ -459,12 +459,12 @@ private fun initialPlayer() = Trainer(
 )
 
 private fun initialAi() = Trainer(
-    name = "Rival",
+    name = "Naughty Knuckles",
     color = Threat,
     roster = listOf(
         Fighter(
-            name = "Brakka",
-            species = "Redback Gorilla",
+            name = "Bananabandit",
+            species = "Bad-Apple Gorilla",
             element = Element.Vine,
             art = R.drawable.animal_gorilla,
             maxHp = 98,
@@ -483,8 +483,8 @@ private fun initialAi() = Trainer(
             )
         ),
         Fighter(
-            name = "Koro",
-            species = "Scout Monkey",
+            name = "Mischief Munk",
+            species = "Rotten Scout Monkey",
             element = Element.Fruit,
             art = R.drawable.animal_monkey,
             maxHp = 76,
@@ -821,7 +821,7 @@ private fun TeamScreen(state: GameState) {
     ) {
         item { Header(state) }
         item { TrainerRoster("Your Team", state.player) }
-        item { TrainerRoster("AI Rival", state.ai) }
+        item { TrainerRoster("Bad Monkey Crew", state.ai) }
     }
 }
 
