@@ -3,6 +3,7 @@
 build/
 app/build/
 app/debug/
+assets-src/
 local.properties
 *.iml
 keystore.properties
