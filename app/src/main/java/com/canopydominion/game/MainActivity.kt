@@ -18,21 +18,30 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AccountTree
+import androidx.compose.material.icons.rounded.Article
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Pets
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -52,10 +61,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlin.math.PI
@@ -79,10 +90,13 @@ private val Moss = Color(0xFF6E8E4E)
 private val Banana = Color(0xFFF4C542)
 private val Bark = Color(0xFF81522D)
 private val Soil = Color(0xFF4A3524)
-private val Night = Color(0xFF101914)
-private val Panel = Color(0xFF18251E)
+private val Night = Color(0xFF0B1110)
+private val Panel = Color(0xFF13201B)
+private val PanelHigh = Color(0xFF1D2B25)
+private val InkMuted = Color(0xFFB9C6B6)
 private val RiverBlue = Color(0xFF4AA3B5)
 private val Threat = Color(0xFFCF6B5A)
+private val Plum = Color(0xFF6D597A)
 
 @Composable
 private fun CanopyTheme(content: @Composable () -> Unit) {
@@ -95,8 +109,8 @@ private fun CanopyTheme(content: @Composable () -> Unit) {
             surface = Panel,
             onPrimary = Night,
             onSecondary = Color.White,
-            onSurface = Color(0xFFEAF3DF),
-            onBackground = Color(0xFFEAF3DF)
+            onSurface = Color(0xFFE8F0E3),
+            onBackground = Color(0xFFE8F0E3)
         ),
         content = content
     )
@@ -135,6 +149,13 @@ data class Rival(
     val plan: String
 )
 
+data class TurnAction(
+    val id: String,
+    val title: String,
+    val cost: String,
+    val enabled: Boolean
+)
+
 data class GameState(
     val turn: Int = 1,
     val bananas: Int = 18,
@@ -145,6 +166,8 @@ data class GameState(
     val hunger: Int = 38,
     val bond: Int = 62,
     val research: Int = 0,
+    val actions: Int = 3,
+    val alert: Int = 12,
     val selectedTile: Int = 18,
     val tiles: List<HexTile> = initialMap(),
     val rivals: List<Rival> = initialRivals(),
@@ -160,11 +183,12 @@ class GameViewModel : ViewModel() {
     }
 
     fun feed() {
-        if (state.bananas < 3) {
-            addLog("Not enough bananas for a feast.")
+        if (state.actions < 1 || state.bananas < 3) {
+            addLog("Feeding needs 1 action and 3 bananas.")
             return
         }
         state = state.copy(
+            actions = state.actions - 1,
             bananas = state.bananas - 3,
             hunger = (state.hunger - 24).coerceAtLeast(0),
             joy = (state.joy + 7).coerceAtMost(100),
@@ -174,11 +198,12 @@ class GameViewModel : ViewModel() {
     }
 
     fun play() {
-        if (state.timber < 2) {
-            addLog("You need timber to build climbing toys.")
+        if (state.actions < 1 || state.timber < 2) {
+            addLog("Playing needs 1 action and 2 timber.")
             return
         }
         state = state.copy(
+            actions = state.actions - 1,
             timber = state.timber - 2,
             joy = (state.joy + 18).coerceAtMost(100),
             bond = (state.bond + 3).coerceAtMost(100),
@@ -189,9 +214,11 @@ class GameViewModel : ViewModel() {
 
     fun groom() {
         state = state.copy(
+            actions = (state.actions - 1).coerceAtLeast(0),
             bond = (state.bond + 13).coerceAtMost(100),
             joy = (state.joy + 5).coerceAtMost(100),
-            hunger = (state.hunger + 3).coerceAtMost(100)
+            hunger = (state.hunger + 3).coerceAtMost(100),
+            alert = (state.alert - 6).coerceAtLeast(0)
         )
         addLog("Grooming calms the alpha and keeps the troop loyal.")
     }
@@ -199,46 +226,56 @@ class GameViewModel : ViewModel() {
     fun scout() {
         val selected = state.tiles.first { it.id == state.selectedTile }
         val neighbors = state.tiles.filter { tile ->
-            axialDistance(selected.q, selected.r, tile.q, tile.r) == 1 && !tile.explored
+            axialDistance(selected.q, selected.r, tile.q, tile.r) == 1 && !tile.explored && selected.owner == Tribe.Player
         }
-        if (state.bananas < 2 || neighbors.isEmpty()) {
-            addLog("No nearby hidden hex can be scouted right now.")
+        val cost = scoutCost()
+        if (state.actions < 1 || state.bananas < cost || neighbors.isEmpty()) {
+            addLog("Scout from one of your border hexes. Needs 1 action and $cost bananas.")
             return
         }
-        val target = neighbors.maxBy { it.terrain.lore + it.terrain.food }
+        val target = neighbors.maxBy { it.terrain.lore + it.terrain.food + if (state.joy > 65) 1 else 0 }
         state = state.copy(
-            bananas = state.bananas - 2,
+            actions = state.actions - 1,
+            bananas = state.bananas - cost,
             tiles = state.tiles.map { if (it.id == target.id) it.copy(explored = true) else it },
             lore = state.lore + target.terrain.lore,
+            hunger = (state.hunger + 4).coerceAtMost(100),
             selectedTile = target.id
         )
-        addLog("Scouts reveal a ${target.terrain.label.lowercase()} hex.")
+        addLog("Scouts reveal ${target.terrain.label.lowercase()} land beside your canopy.")
     }
 
     fun settle() {
         val tile = state.tiles.first { it.id == state.selectedTile }
-        if (!tile.explored || tile.owner != Tribe.None || state.bananas < 5 || state.timber < 5) {
-            addLog("Settling needs an explored free hex, 5 bananas, and 5 timber.")
+        val adjacentToPlayer = state.tiles.any { it.owner == Tribe.Player && axialDistance(it.q, it.r, tile.q, tile.r) == 1 }
+        val nearRival = state.tiles.any { it.owner != Tribe.Player && it.owner != Tribe.None && axialDistance(it.q, it.r, tile.q, tile.r) == 1 }
+        val bananaCost = if (nearRival) 7 else 5
+        val timberCost = if (tile.terrain == Terrain.Thorn) 7 else 5
+        if (state.actions < 1 || !tile.explored || tile.owner != Tribe.None || !adjacentToPlayer || state.bananas < bananaCost || state.timber < timberCost) {
+            addLog("Settling needs 1 action, a free explored adjacent hex, $bananaCost bananas, and $timberCost timber.")
             return
         }
         state = state.copy(
-            bananas = state.bananas - 5,
-            timber = state.timber - 5,
+            actions = state.actions - 1,
+            bananas = state.bananas - bananaCost,
+            timber = state.timber - timberCost,
             tiles = state.tiles.map {
                 if (it.id == tile.id) it.copy(owner = Tribe.Player, settlement = "Nest ${ownedTiles(Tribe.Player) + 1}") else it
             },
-            bond = (state.bond + 4).coerceAtMost(100)
+            bond = (state.bond + 4).coerceAtMost(100),
+            alert = (state.alert + if (nearRival) 8 else 2).coerceAtMost(100)
         )
-        addLog("A new canopy nest claims the ${tile.terrain.label.lowercase()}.")
+        addLog("A new nest claims ${tile.terrain.label.lowercase()}${if (nearRival) " near rival borders" else ""}.")
     }
 
     fun research() {
-        if (state.lore < 6) {
-            addLog("You need 6 lore to teach a new trick.")
+        if (state.actions < 1 || state.lore < 6) {
+            addLog("Teaching a trick needs 1 action and 6 lore.")
             return
         }
         val next = state.research + 1
         state = state.copy(
+            actions = state.actions - 1,
             lore = state.lore - 6,
             research = next,
             joy = (state.joy + 4).coerceAtMost(100)
@@ -253,30 +290,53 @@ class GameViewModel : ViewModel() {
 
     fun endTurn() {
         val owned = state.tiles.filter { it.owner == Tribe.Player }
-        val foodGain = owned.sumOf { it.terrain.food } + state.research
-        val woodGain = owned.sumOf { it.terrain.wood }
-        val loreGain = owned.sumOf { it.terrain.lore }
+        val careBonus = when {
+            state.hunger < 30 && state.joy > 65 -> 2
+            state.hunger > 80 || state.joy < 30 -> -2
+            else -> 0
+        }
+        val pressure = borderPressure(state.tiles)
+        val foodGain = (owned.sumOf { it.terrain.food } + state.research + careBonus).coerceAtLeast(0)
+        val woodGain = (owned.sumOf { it.terrain.wood } + if (state.bond > 70) 1 else 0).coerceAtLeast(0)
+        val loreGain = (owned.sumOf { it.terrain.lore } + if (state.joy > 75) 1 else 0).coerceAtLeast(0)
         val neglect = when {
             state.hunger > 82 -> 13
             state.joy < 28 -> 8
             else -> 0
         }
-        val npcResult = runNpcTurn(state)
+        val npcResult = runNpcTurn(state.copy(alert = (state.alert + pressure * 3).coerceAtMost(100)))
         val event = randomEvent(state.turn, state.joy, state.hunger)
         state = state.copy(
             turn = state.turn + 1,
+            actions = actionLimit(state.bond, state.joy, state.hunger),
             bananas = (state.bananas + foodGain + event.bananas).coerceAtLeast(0),
             timber = (state.timber + woodGain + event.timber).coerceAtLeast(0),
             lore = (state.lore + loreGain + event.lore).coerceAtLeast(0),
             troop = (state.troop + if (state.bond > 80 && state.hunger < 40) 1 else 0).coerceAtMost(30),
-            hunger = (state.hunger + 13 - foodGain / 2).coerceIn(0, 100),
+            hunger = (state.hunger + 13 - foodGain / 2 + pressure).coerceIn(0, 100),
             joy = (state.joy - 7 - neglect + event.joy).coerceIn(0, 100),
-            bond = (state.bond - if (neglect > 0) 5 else 1).coerceIn(0, 100),
+            bond = (state.bond - if (neglect > 0) 5 else 1 - pressure / 2).coerceIn(0, 100),
+            alert = (npcResult.alert + pressure * 4).coerceIn(0, 100),
             rivals = npcResult.rivals,
             tiles = npcResult.tiles,
-            log = (listOf(event.message) + npcResult.messages + state.log).take(9)
+            log = (listOf("Yield: +$foodGain bananas, +$woodGain timber, +$loreGain lore.", event.message) + npcResult.messages + state.log).take(9)
         )
     }
+
+    fun tileActions(): List<TurnAction> {
+        val tile = state.tiles.first { it.id == state.selectedTile }
+        val adjacentToPlayer = state.tiles.any { it.owner == Tribe.Player && axialDistance(it.q, it.r, tile.q, tile.r) == 1 }
+        val canScout = tile.owner == Tribe.Player && state.tiles.any { axialDistance(tile.q, tile.r, it.q, it.r) == 1 && !it.explored }
+        val nearRival = state.tiles.any { it.owner != Tribe.Player && it.owner != Tribe.None && axialDistance(it.q, it.r, tile.q, tile.r) == 1 }
+        val settleBananas = if (nearRival) 7 else 5
+        val settleTimber = if (tile.terrain == Terrain.Thorn) 7 else 5
+        return listOf(
+            TurnAction("scout", "Scout", "1 act / ${scoutCost()} bananas", state.actions > 0 && state.bananas >= scoutCost() && canScout),
+            TurnAction("settle", "Settle", "1 act / $settleBananas B / $settleTimber T", state.actions > 0 && tile.explored && tile.owner == Tribe.None && adjacentToPlayer && state.bananas >= settleBananas && state.timber >= settleTimber)
+        )
+    }
+
+    private fun scoutCost(): Int = if (state.research >= 2 || state.joy > 70) 1 else 2
 
     private fun ownedTiles(tribe: Tribe): Int = state.tiles.count { it.owner == tribe }
 
@@ -304,15 +364,35 @@ private fun randomEvent(turn: Int, joy: Int, hunger: Int): EventResult {
     }
 }
 
-data class NpcTurn(val rivals: List<Rival>, val tiles: List<HexTile>, val messages: List<String>)
+data class NpcTurn(val rivals: List<Rival>, val tiles: List<HexTile>, val messages: List<String>, val alert: Int)
 
 private fun runNpcTurn(state: GameState): NpcTurn {
     var tiles = state.tiles
+    var alert = state.alert
     val messages = mutableListOf<String>()
     val rivals = state.rivals.map { rival ->
         val owned = tiles.filter { it.owner == rival.tribe }
+        val bordersPlayer = owned.any { enemy ->
+            tiles.any { it.owner == Tribe.Player && axialDistance(enemy.q, enemy.r, it.q, it.r) == 1 }
+        }
+        val raidRoll = Random(state.turn * 41 + rival.power)
+        if (bordersPlayer && rival.temper * rival.power > state.bond / 8f && raidRoll.nextFloat() < 0.38f) {
+            val playerBorder = tiles.filter { player ->
+                player.owner == Tribe.Player && owned.any { axialDistance(player.q, player.r, it.q, it.r) == 1 }
+            }.minByOrNull { if (it.settlement != null) 0 else 1 }
+            if (playerBorder != null && state.alert > 62 && state.research < 3) {
+                tiles = tiles.map { if (it.id == playerBorder.id) it.copy(owner = rival.tribe, settlement = null, explored = true) else it }
+                messages += "${rival.name} raids and takes ${playerBorder.terrain.label.lowercase()} land."
+                alert = (alert + 18).coerceAtMost(100)
+                return@map rival.copy(power = rival.power + 2, mood = (rival.mood + 6).coerceAtMost(100), plan = "Pushing your border")
+            } else {
+                messages += "${rival.name} tests your border, but drums and loyal scouts hold."
+                alert = (alert + 9).coerceAtMost(100)
+                return@map rival.copy(power = rival.power + 1, mood = (rival.mood - 3).coerceAtLeast(0), plan = "Recovering from a failed raid")
+            }
+        }
         val frontier = owned.flatMap { origin ->
-            tiles.filter { axialDistance(origin.q, origin.r, it.q, it.r) == 1 && it.owner == Tribe.None }
+            tiles.filter { axialDistance(origin.q, origin.r, it.q, it.r) == 1 && it.owner == Tribe.None && it.explored }
         }.distinctBy { it.id }
         val target = frontier.maxByOrNull { tile ->
             tile.terrain.food * rival.hunger + tile.terrain.lore * rival.curiosity + Random(state.turn + tile.id).nextFloat()
@@ -321,6 +401,7 @@ private fun runNpcTurn(state: GameState): NpcTurn {
         if (shouldExpand && target != null) {
             tiles = tiles.map { if (it.id == target.id) it.copy(owner = rival.tribe, explored = true) else it }
             messages += "${rival.name} claims ${target.terrain.label.lowercase()} land."
+            alert = (alert + if (tiles.any { it.owner == Tribe.Player && axialDistance(it.q, it.r, target.q, target.r) == 1 }) 10 else 2).coerceAtMost(100)
             rival.copy(
                 power = rival.power + target.terrain.food + target.terrain.wood + 1,
                 mood = (rival.mood + 2).coerceAtMost(100),
@@ -331,7 +412,19 @@ private fun runNpcTurn(state: GameState): NpcTurn {
             rival.copy(power = rival.power + 1, mood = (rival.mood - 1).coerceAtLeast(0), plan = plan)
         }
     }
-    return NpcTurn(rivals, tiles, messages.ifEmpty { listOf("Rival tribes hold position and watch your canopy.") })
+    return NpcTurn(rivals, tiles, messages.ifEmpty { listOf("Rival tribes hold position and watch your canopy.") }, alert)
+}
+
+private fun actionLimit(bond: Int, joy: Int, hunger: Int): Int = when {
+    hunger > 82 || joy < 25 -> 2
+    bond > 78 && joy > 60 -> 4
+    else -> 3
+}
+
+private fun borderPressure(tiles: List<HexTile>): Int {
+    return tiles.count { player ->
+        player.owner == Tribe.Player && tiles.any { it.owner != Tribe.Player && it.owner != Tribe.None && axialDistance(player.q, player.r, it.q, it.r) == 1 }
+    }
 }
 
 private fun initialRivals() = listOf(
@@ -380,14 +473,31 @@ private fun axialDistance(q1: Int, r1: Int, q2: Int, r2: Int): Int {
 private fun CanopyApp(vm: GameViewModel = viewModel()) {
     var tab by rememberSaveable { mutableStateOf(GameTab.Canopy) }
     Scaffold(
+        containerColor = Night,
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0F1712)) {
+            NavigationBar(
+                containerColor = Color(0xFF0A0F0D),
+                modifier = Modifier.navigationBarsPadding()
+            ) {
                 GameTab.entries.forEach { item ->
                     NavigationBarItem(
                         selected = tab == item,
                         onClick = { tab = item },
-                        icon = { Text(item.icon, fontWeight = FontWeight.Bold) },
-                        label = { Text(item.label) }
+                        icon = {
+                            Icon(
+                                imageVector = item.icon,
+                                contentDescription = item.label,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        },
+                        label = { Text(item.label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = Night,
+                            selectedTextColor = CanopyGreen,
+                            indicatorColor = Banana,
+                            unselectedIconColor = Color(0xFF9EA8A3),
+                            unselectedTextColor = Color(0xFF9EA8A3)
+                        )
                     )
                 }
             }
@@ -396,7 +506,8 @@ private fun CanopyApp(vm: GameViewModel = viewModel()) {
         Surface(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Night)
+                .background(Brush.verticalGradient(listOf(Color(0xFF0D1713), Night)))
+                .statusBarsPadding()
                 .padding(padding),
             color = Night
         ) {
@@ -412,11 +523,11 @@ private fun CanopyApp(vm: GameViewModel = viewModel()) {
     }
 }
 
-enum class GameTab(val label: String, val icon: String) {
-    Canopy("Canopy", "C"),
-    Island("Island", "I"),
-    Tribes("Tribes", "T"),
-    Log("Log", "L")
+enum class GameTab(val label: String, val icon: ImageVector) {
+    Canopy("Canopy", Icons.Rounded.Pets),
+    Island("Island", Icons.Rounded.AccountTree),
+    Tribes("Tribes", Icons.Rounded.Groups),
+    Log("Log", Icons.Rounded.Article)
 }
 
 @Composable
@@ -430,8 +541,8 @@ private fun CanopyScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
             Header(state)
@@ -452,10 +563,13 @@ private fun CanopyScreen(
         item {
             Button(
                 onClick = onEndTurn,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Banana, contentColor = Night)
             ) {
-                Text("End Turn", fontWeight = FontWeight.Bold)
+                Text("End Turn", fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -469,11 +583,20 @@ private fun Header(state: GameState) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text("Canopy Dominion", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                Text("Turn ${state.turn} - offline monkey 4X", color = Color(0xFFB8C8B2))
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    "Canopy Dominion",
+                    fontSize = 28.sp,
+                    lineHeight = 30.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFFEAF3DF)
+                )
+                Text("Turn ${state.turn} / offline 4X", color = InkMuted, fontSize = 15.sp)
             }
-            Text("Troop ${state.troop}", color = Banana, fontWeight = FontWeight.Bold)
+            Column(horizontalAlignment = Alignment.End) {
+                Text("Troop", color = InkMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text(state.troop.toString(), color = Banana, fontSize = 24.sp, fontWeight = FontWeight.Black)
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             ResourcePill("Bananas", state.bananas, Banana, Modifier.weight(1f))
@@ -488,11 +611,11 @@ private fun ResourcePill(label: String, value: Int, color: Color, modifier: Modi
     Card(
         modifier = modifier,
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2B23))
+        colors = CardDefaults.cardColors(containerColor = PanelHigh)
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            Text(label, color = Color(0xFFB8C8B2), style = MaterialTheme.typography.labelSmall)
-            Text(value.toString(), color = color, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Text(label, color = InkMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Text(value.toString(), color = color, fontSize = 24.sp, lineHeight = 26.sp, fontWeight = FontWeight.Black)
         }
     }
 }
@@ -507,33 +630,37 @@ private fun MonkeyHabitat(state: GameState) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(250.dp)
-                .background(Brush.verticalGradient(listOf(Color(0xFF244B38), Color(0xFF132017))))
+                .height(214.dp)
+                .background(Brush.verticalGradient(listOf(Color(0xFF233E36), Color(0xFF14201C))))
         ) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawCanopyBackground()
                 drawMonkey(
                     mood = state.joy,
                     hunger = state.hunger,
-                    center = Offset(size.width * 0.5f, size.height * 0.54f),
+                    center = Offset(size.width * 0.58f, size.height * 0.5f),
                     scale = size.minDimension / 260f
                 )
             }
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(14.dp)
+                    .fillMaxWidth()
+                    .background(Color(0xAA0D1411))
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
             ) {
                 Text(
                     monkeyStatus(state),
                     color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
+                    fontSize = 17.sp,
+                    lineHeight = 20.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "Care affects production, loyalty, and troop growth.",
-                    color = Color(0xFFCBD8C1),
-                    style = MaterialTheme.typography.bodySmall
+                    "Care affects yield, loyalty, and troop growth.",
+                    color = InkMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp
                 )
             }
         }
@@ -548,45 +675,50 @@ private fun monkeyStatus(state: GameState): String = when {
 }
 
 private fun DrawScope.drawCanopyBackground() {
-    drawRect(Color(0xFF1E3528), size = size)
-    for (i in 0..8) {
-        val x = size.width * (i / 8f)
-        drawCircle(Color(0xFF2F7D58), radius = 58f, center = Offset(x, 34f + (i % 3) * 22f))
+    drawRect(Color(0xFF183228), size = size)
+    drawCircle(Color(0xFF385345), radius = size.width * 0.34f, center = Offset(size.width * 0.12f, size.height * 0.08f))
+    drawCircle(Color(0xFF245B45), radius = size.width * 0.22f, center = Offset(size.width * 0.92f, size.height * 0.04f))
+    for (i in 0..7) {
+        val x = size.width * (i / 7f)
+        drawCircle(Color(0xFF2F855F), radius = 38f, center = Offset(x, 18f + (i % 2) * 22f))
     }
-    drawRect(Soil, topLeft = Offset(0f, size.height * 0.82f), size = Size(size.width, size.height * 0.18f))
-    drawLine(Bark, Offset(0f, size.height * 0.68f), Offset(size.width, size.height * 0.6f), strokeWidth = 18f)
+    drawRect(Soil, topLeft = Offset(0f, size.height * 0.78f), size = Size(size.width, size.height * 0.22f))
+    drawLine(Color(0xFF8D5B33), Offset(0f, size.height * 0.66f), Offset(size.width, size.height * 0.58f), strokeWidth = 14f)
+    drawLine(Color(0xFF5B3920), Offset(0f, size.height * 0.69f), Offset(size.width, size.height * 0.61f), strokeWidth = 4f)
 }
 
 private fun DrawScope.drawMonkey(mood: Int, hunger: Int, center: Offset, scale: Float) {
     fun Float.s() = this * scale
-    drawCircle(Bark, 55f.s(), center)
-    drawCircle(Color(0xFF6B421F), 28f.s(), center + Offset((-50f).s(), (-6f).s()))
-    drawCircle(Color(0xFF6B421F), 28f.s(), center + Offset(50f.s(), (-6f).s()))
-    drawCircle(Color(0xFFD9A066), 38f.s(), center + Offset(0f, 18f.s()))
-    drawCircle(Night, 6f.s(), center + Offset((-18f).s(), (-9f).s()))
-    drawCircle(Night, 6f.s(), center + Offset(18f.s(), (-9f).s()))
+    drawCircle(Color(0xFF5B371D), 63f.s(), center + Offset(0f, 16f.s()))
+    drawCircle(Color(0xFF9A6231), 53f.s(), center)
+    drawCircle(Color(0xFF6B421F), 34f.s(), center + Offset((-53f).s(), 2f.s()))
+    drawCircle(Color(0xFF6B421F), 34f.s(), center + Offset(53f.s(), 2f.s()))
+    drawCircle(Color(0xFFE0A866), 39f.s(), center + Offset(0f, 21f.s()))
+    drawCircle(Color(0xFF0A0F0D), 6f.s(), center + Offset((-18f).s(), (-8f).s()))
+    drawCircle(Color(0xFF0A0F0D), 6f.s(), center + Offset(18f.s(), (-8f).s()))
     drawCircle(Color(0xFFF2C48B), 8f.s(), center + Offset(0f, 11f.s()))
     val smile = mood >= 45 && hunger < 72
     val mouthY = center.y + 28f.s()
     if (smile) {
-        drawArc(Night, 10f, 160f, false, Offset(center.x - 24f.s(), mouthY - 18f.s()), Size(48f.s(), 30f.s()), style = Stroke(4f.s()))
+        drawArc(Color(0xFF0A0F0D), 10f, 160f, false, Offset(center.x - 24f.s(), mouthY - 18f.s()), Size(48f.s(), 30f.s()), style = Stroke(4f.s()))
     } else {
-        drawLine(Night, Offset(center.x - 18f.s(), mouthY), Offset(center.x + 18f.s(), mouthY), strokeWidth = 4f.s())
+        drawLine(Color(0xFF0A0F0D), Offset(center.x - 18f.s(), mouthY), Offset(center.x + 18f.s(), mouthY), strokeWidth = 4f.s())
     }
-    drawCircle(Banana, 10f.s(), center + Offset(62f.s(), 48f.s()))
+    drawCircle(Banana, 11f.s(), center + Offset(66f.s(), 50f.s()))
 }
 
 @Composable
 private fun CareButton(title: String, cost: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Button(
         onClick = onClick,
-        modifier = modifier.height(58.dp),
+        modifier = modifier.height(54.dp),
         shape = RoundedCornerShape(8.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF244532), contentColor = Color.White)
+        colors = ButtonDefaults.buttonColors(containerColor = PanelHigh, contentColor = Color.White),
+        contentPadding = ButtonDefaults.ContentPadding
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(title, fontWeight = FontWeight.Bold)
-            Text(cost, style = MaterialTheme.typography.labelSmall, color = Color(0xFFC8D6C0))
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text(cost, fontSize = 10.sp, color = InkMuted)
         }
     }
 }
@@ -594,7 +726,7 @@ private fun CareButton(title: String, cost: String, onClick: () -> Unit, modifie
 @Composable
 private fun NeedPanel(state: GameState) {
     Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             NeedBar("Hunger", state.hunger, Threat)
             NeedBar("Joy", state.joy, Banana)
             NeedBar("Bond", state.bond, CanopyGreen)
@@ -607,17 +739,17 @@ private fun NeedBar(label: String, value: Int, color: Color) {
     val progress by animateFloatAsState(value / 100f, label = label)
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, fontWeight = FontWeight.Bold)
-            Text("$value")
+            Text(label, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text("$value", fontSize = 14.sp, color = Color(0xFFDDE7D9), fontWeight = FontWeight.SemiBold)
         }
         LinearProgressIndicator(
             progress = { progress },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(8.dp)
+                .height(7.dp)
                 .clip(CircleShape),
             color = color,
-            trackColor = Color(0xFF314036)
+            trackColor = Color(0xFF314039)
         )
     }
 }
@@ -632,17 +764,26 @@ private fun IslandScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Header(state)
-        HexMap(
-            state = state,
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1f),
-            onSelect = onSelect
-        )
+                .weight(1f)
+                .background(Brush.radialGradient(listOf(Color(0xFF14241E), Night)), RoundedCornerShape(8.dp))
+                .padding(8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            HexMap(
+                state = state,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f),
+                onSelect = onSelect
+            )
+        }
         SelectedTilePanel(state, onScout, onSettle)
     }
 }
@@ -712,19 +853,43 @@ private fun SelectedTilePanel(state: GameState, onScout: () -> Unit, onSettle: (
     val tile = state.tiles.first { it.id == state.selectedTile }
     Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Column {
-                    Text(if (tile.explored) tile.terrain.label else "Unknown Canopy", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    Text("Owner: ${tile.owner.readable()}${tile.settlement?.let { " - $it" } ?: ""}", color = Color(0xFFB8C8B2))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (tile.explored) tile.terrain.label else "Unknown Canopy",
+                        fontSize = 22.sp,
+                        lineHeight = 24.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Text(
+                        "Owner: ${tile.owner.readable()}${tile.settlement?.let { " - $it" } ?: ""}",
+                        color = InkMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 17.sp
+                    )
                 }
-                Text("F${tile.terrain.food} W${tile.terrain.wood} L${tile.terrain.lore}", color = Banana, fontWeight = FontWeight.Bold)
+                Text("F${tile.terrain.food} W${tile.terrain.wood} L${tile.terrain.lore}", color = Banana, fontSize = 18.sp, fontWeight = FontWeight.Black)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onScout, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                    Text("Scout")
+                Button(
+                    onClick = onScout,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Banana, contentColor = Night)
+                ) {
+                    Text("Scout", fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 }
-                Button(onClick = onSettle, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                    Text("Settle")
+                Button(
+                    onClick = onSettle,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = CanopyGreen, contentColor = Color.White)
+                ) {
+                    Text("Settle", fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -743,23 +908,33 @@ private fun TribesScreen(state: GameState, onResearch: () -> Unit) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item { Header(state) }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Research", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    Text("Current level ${state.research}. Spend lore to improve your tribe economy and defense.", color = Color(0xFFB8C8B2))
-                    Button(onClick = onResearch, shape = RoundedCornerShape(8.dp)) {
-                        Text("Teach Trick - 6 lore")
+                    Text("Research", fontSize = 22.sp, lineHeight = 24.sp, fontWeight = FontWeight.Black)
+                    Text(
+                        "Level ${state.research}. Spend lore to improve economy and defense.",
+                        color = InkMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                    Button(
+                        onClick = onResearch,
+                        modifier = Modifier.height(46.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Banana, contentColor = Night)
+                    ) {
+                        Text("Teach Trick - 6 lore", fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
-        items(state.rivals.size) { index ->
-            RivalCard(state.rivals[index])
+        items(state.rivals) { rival ->
+            RivalCard(rival)
         }
     }
 }
@@ -776,17 +951,17 @@ private fun RivalCard(rival: Rival) {
         ) {
             Box(
                 modifier = Modifier
-                    .size(46.dp)
+                    .size(42.dp)
                     .clip(CircleShape)
                     .background(rival.color),
                 contentAlignment = Alignment.Center
             ) {
-                Text(rival.name.take(1), color = Night, fontWeight = FontWeight.Black)
+                Text(rival.name.take(1), color = Night, fontSize = 16.sp, fontWeight = FontWeight.Black)
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(rival.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
-                Text(rival.plan, color = Color(0xFFB8C8B2))
-                Text("Power ${rival.power} - Mood ${rival.mood}", color = Banana, style = MaterialTheme.typography.bodySmall)
+                Text(rival.name, fontSize = 17.sp, lineHeight = 20.sp, fontWeight = FontWeight.Black)
+                Text(rival.plan, color = InkMuted, fontSize = 13.sp, lineHeight = 17.sp)
+                Text("Power ${rival.power} - Mood ${rival.mood}", color = Banana, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -797,24 +972,28 @@ private fun LogScreen(state: GameState) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item { Header(state) }
-        items(state.log.size) { index ->
+        items(state.log) { entry ->
             Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
                 Text(
-                    state.log[index],
+                    entry,
                     modifier = Modifier.padding(14.dp),
-                    color = Color(0xFFEAF3DF)
+                    color = Color(0xFFEAF3DF),
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp
                 )
             }
         }
         item {
             Text(
-                "No network permission is declared. All NPC choices, events, and game state run on device.",
-                color = Color(0xFFB8C8B2),
+                "Offline build. NPC choices, events, and state run on device.",
+                color = InkMuted,
                 textAlign = TextAlign.Center,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(10.dp)
