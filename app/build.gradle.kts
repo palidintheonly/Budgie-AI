@@ -15,14 +15,19 @@ val hasReleaseKeystore = keystorePropertiesFile.exists()
 
 android {
     namespace = "com.monkeymischief.game"
-    compileSdk = 36
+    compileSdk {
+        version = release(36) {
+            minorApiLevel = 1
+        }
+    }
+    buildToolsVersion = "36.1.0"
 
     defaultConfig {
         applicationId = "com.monkeymischief.game"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.5"
+        versionName = "0.0.6"
         manifestPlaceholders["appLabel"] = "Monkey Mischief"
     }
 

@@ -168,7 +168,7 @@ data class Fighter(
     val name: String,
     val species: String,
     val element: Element,
-    @DrawableRes val art: Int,
+    @param:DrawableRes val art: Int,
     val maxHp: Int,
     val hp: Int,
     val maxEnergy: Int,
@@ -359,7 +359,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
                 val payload = JSONObject()
                     .put("deviceId", deviceId)
                     .put("client", "android")
-                    .put("version", "0.0.5-alpha")
+                    .put("version", "0.0.6-alpha")
                     .toString()
                 val connection = (URL("$BackendBaseUrl/v1/users/register").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
@@ -856,15 +856,15 @@ private fun BattleScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Header(state)
         BattleArena(
             state = state,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(0.92f)
+                .weight(0.82f)
         )
         ActionPanel(
             state = state,
@@ -876,7 +876,7 @@ private fun BattleScreen(
             onReset = onReset,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1.08f)
+                .weight(1.18f)
         )
     }
 }
@@ -907,12 +907,12 @@ private fun Header(state: GameState) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("Canopy Duel", fontSize = 24.sp, lineHeight = 26.sp, fontWeight = FontWeight.Black, color = Ink)
-            Text("Turn ${state.turn} / offline AI battle", color = InkMuted, fontSize = 13.sp)
+            Text("Canopy Duel", fontSize = 20.sp, lineHeight = 22.sp, fontWeight = FontWeight.Black, color = Ink)
+            Text("Turn ${state.turn} / offline AI battle", color = InkMuted, fontSize = 11.sp)
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text("Items", color = InkMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-            Text(state.backpack.sumOf { it.count }.toString(), color = Banana, fontSize = 21.sp, fontWeight = FontWeight.Black)
+            Text("Items", color = InkMuted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            Text(state.backpack.sumOf { it.count }.toString(), color = Banana, fontSize = 18.sp, fontWeight = FontWeight.Black)
         }
     }
 }
@@ -939,7 +939,7 @@ private fun BattleArena(state: GameState, modifier: Modifier = Modifier) {
                 alignEnd = true,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(14.dp)
+                    .padding(8.dp)
             )
             FighterSlot(
                 fighter = state.player.active,
@@ -947,7 +947,7 @@ private fun BattleArena(state: GameState, modifier: Modifier = Modifier) {
                 alignEnd = false,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(14.dp)
+                    .padding(8.dp)
             )
         }
     }
@@ -965,7 +965,7 @@ private fun FighterSlot(fighter: Fighter, trainerColor: Color, alignEnd: Boolean
     val hpProgress by animateFloatAsState(fighter.hp / fighter.maxHp.toFloat(), label = "${fighter.name}_hp")
     val energyProgress by animateFloatAsState(fighter.energy / fighter.maxEnergy.toFloat(), label = "${fighter.name}_energy")
     Row(
-        modifier = modifier.fillMaxWidth(0.58f),
+        modifier = modifier.fillMaxWidth(0.48f),
         horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -975,10 +975,10 @@ private fun FighterSlot(fighter: Fighter, trainerColor: Color, alignEnd: Boolean
             colors = CardDefaults.cardColors(containerColor = Color(0xDD111A16)),
             modifier = Modifier.weight(1f)
         ) {
-            Column(Modifier.padding(9.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                    Text(fighter.name, fontSize = 15.sp, lineHeight = 16.sp, fontWeight = FontWeight.Black)
-                    Text(fighter.element.label, color = fighter.element.color, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(fighter.name, fontSize = 13.sp, lineHeight = 14.sp, fontWeight = FontWeight.Black, maxLines = 1)
+                    Text(fighter.element.label, color = fighter.element.color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 }
                 Meter("HP", fighter.hp, fighter.maxHp, hpProgress, Threat)
                 Meter("EN", fighter.energy, fighter.maxEnergy, energyProgress, RiverBlue)
@@ -994,7 +994,7 @@ private fun FighterSlot(fighter: Fighter, trainerColor: Color, alignEnd: Boolean
 
 @Composable
 private fun CreatureArt(fighter: Fighter, bob: Float) {
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(82.dp)) {
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(64.dp)) {
         Canvas(Modifier.fillMaxSize()) {
             drawCircle(fighter.element.color.copy(alpha = 0.18f), radius = size.minDimension * 0.44f)
         }
@@ -1003,7 +1003,7 @@ private fun CreatureArt(fighter: Fighter, bob: Float) {
             contentDescription = fighter.name,
             contentScale = ContentScale.Fit,
             modifier = Modifier
-                .size(66.dp)
+                .size(52.dp)
                 .graphicsLayer {
                     translationY = bob
                     rotationZ = bob * 0.35f
@@ -1060,41 +1060,57 @@ private fun ActionPanel(
         colors = CardDefaults.cardColors(containerColor = Panel),
         shape = RoundedCornerShape(8.dp)
     ) {
-        Column(
+        Row(
             Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(phaseText(state), color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Black)
-            Text("${state.lastPlayerAction}\n${state.lastAiAction}", color = InkMuted, fontSize = 11.sp, lineHeight = 14.sp)
+            Column(
+                modifier = Modifier
+                    .weight(0.72f)
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(phaseText(state), color = Ink, fontSize = 14.sp, lineHeight = 16.sp, fontWeight = FontWeight.Black)
+                Text(
+                    "${state.lastPlayerAction}\n${state.lastAiAction}",
+                    color = InkMuted,
+                    fontSize = 10.sp,
+                    lineHeight = 12.sp,
+                    maxLines = 4
+                )
+            }
             if (state.phase == RoundPhase.PlayerChoice) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Banana)
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
-                        Text("ATTACK", color = Night, fontSize = 12.sp, fontWeight = FontWeight.Black)
+                Column(
+                    modifier = Modifier
+                        .weight(1.45f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f)) {
+                        state.player.active.moves.take(2).forEachIndexed { index, move ->
+                            MoveButton(move, state.player.active, onClick = { onMove(index) }, modifier = Modifier.weight(1f))
+                        }
                     }
-                    Text("Choose one move", color = InkMuted, fontSize = 12.sp)
-                }
-                state.player.active.moves.forEachIndexed { index, move ->
-                    MoveButton(move, state.player.active, onClick = { onMove(index) })
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    BattleButton("Defend", "Guard + energy", onDefend, enabled = true, modifier = Modifier.weight(1f), color = Plum)
-                    BattleButton("Use Item", firstItemLabel(state), { state.backpack.firstOrNull { it.count > 0 }?.let { onUseItem(it.item.id) } }, enabled = state.backpack.any { it.count > 0 }, modifier = Modifier.weight(1f), color = CanopyGreen)
-                    BattleButton("Swap", "Partner", onSwap, enabled = state.player.roster.any { it != state.player.active && !it.isDown }, modifier = Modifier.weight(1f), color = RiverBlue)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f)) {
+                        val thirdMove = state.player.active.moves.getOrNull(2)
+                        if (thirdMove != null) {
+                            MoveButton(thirdMove, state.player.active, onClick = { onMove(2) }, modifier = Modifier.weight(1f))
+                        } else {
+                            Spacer(Modifier.weight(1f))
+                        }
+                        BattleButton("Defend", "Guard + EN", onDefend, enabled = true, modifier = Modifier.weight(1f), color = Plum)
+                        BattleButton("Item", firstItemLabel(state), { state.backpack.firstOrNull { it.count > 0 }?.let { onUseItem(it.item.id) } }, enabled = state.backpack.any { it.count > 0 }, modifier = Modifier.weight(1f), color = CanopyGreen)
+                        BattleButton("Swap", "Partner", onSwap, enabled = state.player.roster.any { it != state.player.active && !it.isDown }, modifier = Modifier.weight(1f), color = RiverBlue)
+                    }
                 }
             } else {
                 Button(
                     onClick = if (state.phase == RoundPhase.MatchOver) onReset else onNext,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp),
+                        .weight(1.45f)
+                        .fillMaxHeight(),
                     shape = RoundedCornerShape(8.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Banana, contentColor = Night)
                 ) {
@@ -1111,36 +1127,25 @@ private fun firstItemLabel(state: GameState): String {
 }
 
 @Composable
-private fun MoveButton(move: Move, fighter: Fighter, onClick: () -> Unit) {
+private fun MoveButton(move: Move, fighter: Fighter, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val cooldown = fighter.cooldowns[move.name] ?: 0
     val enabled = fighter.energy >= move.energyCost && cooldown == 0
     Button(
         onClick = onClick,
         enabled = enabled,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 52.dp),
+        modifier = modifier.fillMaxHeight(),
         shape = RoundedCornerShape(8.dp),
         contentPadding = ButtonDefaults.ContentPadding,
         colors = ButtonDefaults.buttonColors(containerColor = PanelHigh, contentColor = Ink)
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(move.element.color.copy(alpha = 0.2f))
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-            ) {
-                Text("ATK", color = move.element.color, fontSize = 11.sp, fontWeight = FontWeight.Black)
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(move.name, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = FontWeight.Black)
-                Text(move.description, fontSize = 10.sp, lineHeight = 12.sp, color = InkMuted)
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text(move.element.label, color = move.element.color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(if (cooldown > 0) "CD $cooldown" else "${move.energyCost} EN", fontSize = 10.sp, lineHeight = 12.sp, color = InkMuted)
-            }
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.Start
+        ) {
+            Text(move.name, fontSize = 12.sp, lineHeight = 13.sp, fontWeight = FontWeight.Black, maxLines = 1)
+            Text(move.element.label, color = move.element.color, fontSize = 10.sp, lineHeight = 11.sp, fontWeight = FontWeight.Bold)
+            Text(if (cooldown > 0) "CD $cooldown" else "${move.energyCost} EN", fontSize = 9.sp, lineHeight = 10.sp, color = InkMuted)
         }
     }
 }
@@ -1150,14 +1155,14 @@ private fun BattleButton(title: String, subtitle: String, onClick: () -> Unit, e
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.heightIn(min = 50.dp),
+        modifier = modifier.fillMaxHeight(),
         shape = RoundedCornerShape(8.dp),
         contentPadding = ButtonDefaults.ContentPadding,
         colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Color.White)
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(title, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = FontWeight.Black)
-            Text(subtitle, fontSize = 9.sp, lineHeight = 11.sp)
+            Text(title, fontSize = 12.sp, lineHeight = 13.sp, fontWeight = FontWeight.Black, maxLines = 1)
+            Text(subtitle, fontSize = 8.sp, lineHeight = 9.sp, maxLines = 2, textAlign = TextAlign.Center)
         }
     }
 }
