@@ -1,6 +1,9 @@
-package com.canopydominion.game
+package com.monkeymischief.game
 
+import android.app.Application
 import android.os.Bundle
+import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.annotation.DrawableRes
@@ -14,38 +17,42 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Article
+import androidx.compose.material.icons.rounded.Backpack
 import androidx.compose.material.icons.rounded.CatchingPokemon
-import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -70,8 +77,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
@@ -92,6 +104,9 @@ private val CanopyGreen = Color(0xFF2F7D58)
 private val RiverBlue = Color(0xFF4AA3B5)
 private val Threat = Color(0xFFCF6B5A)
 private val Plum = Color(0xFF6D597A)
+private const val BackendBaseUrl = "http://212.227.38.182:5063"
+private const val BackendToken = "MonkeyMischief-0.0.4-alpha-b27bbaac"
+private const val GameLogTag = "MonkeyMischief"
 
 @Composable
 private fun CanopyTheme(content: @Composable () -> Unit) {
@@ -134,6 +149,21 @@ data class Move(
     val description: String
 )
 
+enum class BattleItemKind { HealHp, HealStatus, FullRestore, BoostAttack }
+
+data class BattleItem(
+    val id: String,
+    val name: String,
+    val kind: BattleItemKind,
+    val amount: Int,
+    val description: String
+)
+
+data class BagStack(
+    val item: BattleItem,
+    val count: Int
+)
+
 data class Fighter(
     val name: String,
     val species: String,
@@ -173,23 +203,33 @@ data class GameState(
     val turn: Int = 1,
     val player: Trainer = initialPlayer(),
     val ai: Trainer = initialAi(),
-    val bananas: Int = 8,
+    val backpack: List<BagStack> = initialBackpack(),
     val phase: RoundPhase = RoundPhase.PlayerChoice,
     val lastPlayerAction: String = "Choose a battle command.",
     val lastAiAction: String = "The Naughty Knuckles are watching your troop.",
     val log: List<String> = listOf("The Naughty Knuckles challenge the Elder Fig.")
 )
 
-class GameViewModel : ViewModel() {
+class GameViewModel(application: Application) : AndroidViewModel(application) {
     var state by mutableStateOf(GameState())
         private set
+    private val deviceId = resolveDeviceId(application)
+    private val backendSlot = "device-$deviceId"
+    private var userId: String? = null
+
+    init {
+        logVerbose("viewmodel_init turn=${state.turn} phase=${state.phase} deviceId=$deviceId slot=$backendSlot")
+        registerDeviceThenSync("app_start")
+    }
 
     fun useMove(index: Int) {
+        logVerbose("trigger=useMove index=$index phase=${state.phase} active=${state.player.active.name}")
         if (state.phase != RoundPhase.PlayerChoice) return
         val fighter = state.player.active
         val move = fighter.moves.getOrNull(index) ?: return
         val cooldown = fighter.cooldowns[move.name] ?: 0
         if (fighter.energy < move.energyCost || cooldown > 0 || fighter.isDown) {
+            logVerbose("blocked=useMove move=${move.name} energy=${fighter.energy}/${fighter.maxEnergy} cooldown=$cooldown isDown=${fighter.isDown}")
             addLog("${fighter.name} cannot use ${move.name} right now.")
             return
         }
@@ -197,43 +237,58 @@ class GameViewModel : ViewModel() {
     }
 
     fun defend() {
+        logVerbose("trigger=defend phase=${state.phase} active=${state.player.active.name}")
         if (state.phase == RoundPhase.PlayerChoice) resolveRound(PlayerCommand.Defend)
     }
 
-    fun care() {
+    fun useItem(itemId: String) {
+        logVerbose("trigger=useItem itemId=$itemId phase=${state.phase} active=${state.player.active.name}")
         if (state.phase != RoundPhase.PlayerChoice) return
-        if (state.bananas <= 0) {
-            addLog("No bananas left for a care break.")
+        val stack = state.backpack.firstOrNull { it.item.id == itemId && it.count > 0 }
+        if (stack == null) {
+            logVerbose("blocked=useItem missing itemId=$itemId backpack=${state.backpack.joinToString { "${it.item.id}:${it.count}" }}")
+            addLog("That item is not in your backpack.")
             return
         }
-        resolveRound(PlayerCommand.Care)
+        logVerbose("useItem_selected name=${stack.item.name} count=${stack.count} kind=${stack.item.kind} amount=${stack.item.amount}")
+        resolveRound(PlayerCommand.UseItem(itemId))
     }
 
     fun swap() {
+        logVerbose("trigger=swap phase=${state.phase} activeIndex=${state.player.activeIndex} active=${state.player.active.name}")
         if (state.phase != RoundPhase.PlayerChoice) return
         val next = state.player.roster.indexOfFirstIndexed { index, fighter ->
             index != state.player.activeIndex && !fighter.isDown
         }
         if (next == -1) {
+            logVerbose("blocked=swap no_resting_partner roster=${state.player.roster.joinToString { "${it.name}:${it.hp}" }}")
             addLog("No rested partner can swap in.")
             return
         }
+        logVerbose("swap_selected index=$next fighter=${state.player.roster[next].name}")
         resolveRound(PlayerCommand.Swap(next))
     }
 
     fun nextRound() {
+        logVerbose("trigger=nextRound phase=${state.phase} turn=${state.turn}")
         if (state.phase == RoundPhase.RoundOver) {
             state = state.copy(phase = RoundPhase.PlayerChoice, turn = state.turn + 1)
+            logVerbose("state=nextRound turn=${state.turn} phase=${state.phase}")
+            syncState("next_turn")
         }
     }
 
     fun resetMatch() {
+        logVerbose("trigger=resetMatch oldTurn=${state.turn} oldPhase=${state.phase}")
         state = GameState()
+        logVerbose("state=resetMatch turn=${state.turn} phase=${state.phase}")
+        syncState("reset_match")
     }
 
     private fun resolveRound(command: PlayerCommand) {
         val aiCommand = chooseAiCommand(state)
         val playerFirst = state.player.active.speed >= state.ai.active.speed
+        logVerbose("round_start turn=${state.turn} playerCommand=${command.describe()} aiCommand=${aiCommand.describe()} playerFirst=$playerFirst")
         var working = startRoundTick(state)
         val events = mutableListOf<String>()
 
@@ -254,17 +309,99 @@ class GameViewModel : ViewModel() {
             !working.ai.hasUsableFighter -> "Victory. Your troop wins the bout."
             else -> "Round resolved. Prepare the next choice."
         }
+        logVerbose("round_events ${events.joinToString(" | ")}")
         state = working.copy(
             phase = phase,
             lastPlayerAction = events.firstOrNull { it.startsWith("You") } ?: "You hold position.",
             lastAiAction = events.firstOrNull { it.startsWith(working.ai.name) } ?: "${working.ai.name} waits.",
             log = (events + resultLine + working.log).take(12)
         )
+        logVerbose("round_end turn=${state.turn} phase=${state.phase} player=${state.player.active.name}:${state.player.active.hp}/${state.player.active.maxHp} ai=${state.ai.active.name}:${state.ai.active.hp}/${state.ai.active.maxHp}")
+        syncState("round_resolved")
     }
 
     private fun addLog(message: String) {
+        logVerbose("ui_log message=$message")
         state = state.copy(log = (listOf(message) + state.log).take(12))
     }
+
+    private fun syncState(reason: String) {
+        val snapshot = state.toBackendJson(reason, deviceId, userId).toString()
+        logVerbose("sync_start reason=$reason url=$BackendBaseUrl/v1/game/$backendSlot bytes=${snapshot.length} turn=${state.turn} phase=${state.phase} deviceId=$deviceId userId=${userId ?: "pending"}")
+        thread(name = "monkey-json-sync", isDaemon = true) {
+            runCatching {
+                val connection = (URL("$BackendBaseUrl/v1/game/$backendSlot").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    setRequestProperty("X-Monkey-Token", BackendToken)
+                }
+                connection.outputStream.use { output -> output.write(snapshot.toByteArray(Charsets.UTF_8)) }
+                val status = connection.responseCode
+                val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    .orEmpty()
+                logVerbose("sync_done reason=$reason status=$status response=$response")
+                connection.disconnect()
+            }.onFailure { error ->
+                Log.e(GameLogTag, "sync_failed reason=$reason error=${error.message}", error)
+            }
+        }
+    }
+
+    private fun registerDeviceThenSync(reason: String) {
+        logVerbose("register_start deviceId=$deviceId url=$BackendBaseUrl/v1/users/register")
+        thread(name = "monkey-user-register", isDaemon = true) {
+            runCatching {
+                val payload = JSONObject()
+                    .put("deviceId", deviceId)
+                    .put("client", "android")
+                    .put("version", "0.0.5-alpha")
+                    .toString()
+                val connection = (URL("$BackendBaseUrl/v1/users/register").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    setRequestProperty("X-Monkey-Token", BackendToken)
+                }
+                connection.outputStream.use { output -> output.write(payload.toByteArray(Charsets.UTF_8)) }
+                val status = connection.responseCode
+                val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    .orEmpty()
+                if (status in 200..299) {
+                    userId = JSONObject(response).optString("userId").takeIf { it.isNotBlank() }
+                    logVerbose("register_done status=$status userId=${userId ?: "missing"} response=$response")
+                } else {
+                    logVerbose("register_failed_status status=$status response=$response")
+                }
+                connection.disconnect()
+            }.onFailure { error ->
+                Log.e(GameLogTag, "register_failed deviceId=$deviceId error=${error.message}", error)
+            }
+            syncState(reason)
+        }
+    }
+}
+
+private fun logVerbose(message: String) {
+    Log.v(GameLogTag, message)
+    println("$GameLogTag: $message")
+}
+
+private fun resolveDeviceId(application: Application): String {
+    val raw = Settings.Secure.getString(application.contentResolver, Settings.Secure.ANDROID_ID)
+    return raw
+        ?.lowercase()
+        ?.replace(Regex("[^a-z0-9_.-]"), "_")
+        ?.takeIf { it.isNotBlank() }
+        ?: "unknown-device"
 }
 
 private enum class Actor { Player, Ai }
@@ -272,8 +409,15 @@ private enum class Actor { Player, Ai }
 private sealed class PlayerCommand {
     data class Move(val index: Int) : PlayerCommand()
     data object Defend : PlayerCommand()
-    data object Care : PlayerCommand()
+    data class UseItem(val itemId: String) : PlayerCommand()
     data class Swap(val index: Int) : PlayerCommand()
+}
+
+private fun PlayerCommand.describe(): String = when (this) {
+    is PlayerCommand.Move -> "Move(index=$index)"
+    PlayerCommand.Defend -> "Defend"
+    is PlayerCommand.UseItem -> "UseItem(itemId=$itemId)"
+    is PlayerCommand.Swap -> "Swap(index=$index)"
 }
 
 private fun startRoundTick(state: GameState): GameState {
@@ -297,7 +441,7 @@ private fun applyCommand(state: GameState, actor: Actor, command: PlayerCommand,
     return when (command) {
         is PlayerCommand.Move -> applyMove(state, actor, command.index, events)
         PlayerCommand.Defend -> applyDefend(state, actor, events)
-        PlayerCommand.Care -> applyCare(state, events)
+        is PlayerCommand.UseItem -> applyItem(state, command.itemId, events)
         is PlayerCommand.Swap -> applySwap(state, actor, command.index, events)
     }
 }
@@ -345,17 +489,23 @@ private fun applyDefend(state: GameState, actor: Actor, events: MutableList<Stri
     return if (actor == Actor.Player) state.copy(player = trainer.replaceActive(fighter)) else state.copy(ai = trainer.replaceActive(fighter))
 }
 
-private fun applyCare(state: GameState, events: MutableList<String>): GameState {
+private fun applyItem(state: GameState, itemId: String, events: MutableList<String>): GameState {
+    val stack = state.backpack.firstOrNull { it.item.id == itemId && it.count > 0 } ?: return state
     val fighter = state.player.active
-    val healed = fighter.copy(
-        hp = (fighter.hp + 12).coerceAtMost(fighter.maxHp),
-        energy = (fighter.energy + 2).coerceAtMost(fighter.maxEnergy),
-        mood = (fighter.mood + 8).coerceAtMost(100),
-        bond = (fighter.bond + 6).coerceAtMost(100),
-        status = if (fighter.status == StatusEffect.Dazed || fighter.status == StatusEffect.Tangled) StatusEffect.None else fighter.status
+    val item = stack.item
+    val updated = when (item.kind) {
+        BattleItemKind.HealHp -> fighter.copy(hp = (fighter.hp + item.amount).coerceAtMost(fighter.maxHp))
+        BattleItemKind.HealStatus -> fighter.copy(status = StatusEffect.None)
+        BattleItemKind.FullRestore -> fighter.copy(hp = fighter.maxHp, status = StatusEffect.None)
+        BattleItemKind.BoostAttack -> fighter.copy(attack = fighter.attack + item.amount, mood = (fighter.mood + 4).coerceAtMost(100))
+    }
+    events += "You use ${item.name} on ${fighter.name}. ${item.description}"
+    return state.copy(
+        backpack = state.backpack.map {
+            if (it.item.id == itemId) it.copy(count = (it.count - 1).coerceAtLeast(0)) else it
+        },
+        player = state.player.replaceActive(updated)
     )
-    events += "You give ${fighter.name} a banana break. HP, energy, and mood recover."
-    return state.copy(bananas = (state.bananas - 1).coerceAtLeast(0), player = state.player.replaceActive(healed))
 }
 
 private fun applySwap(state: GameState, actor: Actor, index: Int, events: MutableList<String>): GameState {
@@ -410,6 +560,63 @@ private inline fun <T> List<T>.indexOfFirstIndexed(predicate: (Int, T) -> Boolea
 }
 
 private fun Actor.label(): String = if (this == Actor.Player) "You" else "Naughty Knuckles"
+
+private fun GameState.toBackendJson(reason: String, deviceId: String, userId: String?): JSONObject = JSONObject()
+    .put("reason", reason)
+    .put("deviceId", deviceId)
+    .put("userId", userId ?: JSONObject.NULL)
+    .put("turn", turn)
+    .put("phase", phase.name)
+    .put("lastPlayerAction", lastPlayerAction)
+    .put("lastAiAction", lastAiAction)
+    .put("player", player.toJson())
+    .put("ai", ai.toJson())
+    .put("backpack", JSONArray().also { array -> backpack.forEach { array.put(it.toJson()) } })
+    .put("log", JSONArray().also { array -> log.forEach { array.put(it) } })
+
+private fun Trainer.toJson(): JSONObject = JSONObject()
+    .put("name", name)
+    .put("activeIndex", activeIndex)
+    .put("active", active.toJson())
+    .put("wins", wins)
+    .put("roster", JSONArray().also { array -> roster.forEach { array.put(it.toJson()) } })
+
+private fun Fighter.toJson(): JSONObject = JSONObject()
+    .put("name", name)
+    .put("species", species)
+    .put("element", element.name)
+    .put("maxHp", maxHp)
+    .put("hp", hp)
+    .put("maxEnergy", maxEnergy)
+    .put("energy", energy)
+    .put("attack", attack)
+    .put("defense", defense)
+    .put("speed", speed)
+    .put("mood", mood)
+    .put("bond", bond)
+    .put("status", status.name)
+    .put("guard", guard)
+    .put("cooldowns", JSONObject().also { json -> cooldowns.forEach { (name, value) -> json.put(name, value) } })
+    .put("moves", JSONArray().also { array -> moves.forEach { array.put(it.toJson()) } })
+
+private fun Move.toJson(): JSONObject = JSONObject()
+    .put("name", name)
+    .put("element", element.name)
+    .put("power", power)
+    .put("energyCost", energyCost)
+    .put("cooldown", cooldown)
+    .put("status", status.name)
+    .put("description", description)
+
+private fun BagStack.toJson(): JSONObject = JSONObject()
+    .put("count", count)
+    .put("item", JSONObject()
+        .put("id", item.id)
+        .put("name", item.name)
+        .put("kind", item.kind.name)
+        .put("amount", item.amount)
+        .put("description", item.description)
+    )
 
 private fun initialPlayer() = Trainer(
     name = "You",
@@ -505,47 +712,126 @@ private fun initialAi() = Trainer(
     )
 )
 
+private fun initialBackpack() = listOf(
+    BagStack(BattleItem("banana_salve", "Banana Salve", BattleItemKind.HealHp, 20, "Restores 20 HP."), 4),
+    BagStack(BattleItem("jungle_tonic", "Jungle Tonic", BattleItemKind.HealHp, 50, "Restores 50 HP."), 2),
+    BagStack(BattleItem("calm_leaf", "Calm Leaf", BattleItemKind.HealStatus, 0, "Clears status."), 2),
+    BagStack(BattleItem("golden_bunch", "Golden Bunch", BattleItemKind.FullRestore, 0, "Fully restores HP and clears status."), 1),
+    BagStack(BattleItem("war_drum", "War Drum", BattleItemKind.BoostAttack, 3, "Raises attack for this bout."), 1)
+)
+
 @Composable
 private fun CanopyApp(vm: GameViewModel = viewModel()) {
     var tab by rememberSaveable { mutableStateOf(GameTab.Battle) }
-    Scaffold(
-        containerColor = Night,
-        bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0A0F0D), modifier = Modifier.navigationBarsPadding()) {
-                GameTab.entries.forEach { item ->
-                    NavigationBarItem(
-                        selected = tab == item,
-                        onClick = { tab = item },
-                        icon = { Icon(item.icon, item.label, modifier = Modifier.size(22.dp)) },
-                        label = { Text(item.label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Night,
-                            selectedTextColor = CanopyGreen,
-                            indicatorColor = Banana,
-                            unselectedIconColor = Color(0xFF9EA8A3),
-                            unselectedTextColor = Color(0xFF9EA8A3)
-                        )
-                    )
-                }
-            }
-        }
-    ) { padding ->
-        Surface(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(Color(0xFF0D1713), Night)))
-                .statusBarsPadding()
-                .padding(padding),
-            color = Night
-        ) {
+    var navVisible by rememberSaveable { mutableStateOf(true) }
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF0D1713), Night)))
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+        color = Night
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) {
             AnimatedContent(targetState = tab, label = "tab") { selected ->
                 when (selected) {
-                    GameTab.Battle -> BattleScreen(vm.state, vm::useMove, vm::defend, vm::care, vm::swap, vm::nextRound, vm::resetMatch)
+                    GameTab.Battle -> BattleScreen(vm.state, vm::useMove, vm::defend, vm::useItem, vm::swap, vm::nextRound, vm::resetMatch)
                     GameTab.Team -> TeamScreen(vm.state)
-                    GameTab.Care -> CareScreen(vm.state, vm::care)
+                    GameTab.Backpack -> BackpackScreen(vm.state, vm::useItem)
                     GameTab.Log -> LogScreen(vm.state)
                 }
             }
+        }
+            if (navVisible) {
+                CompactGameNav(
+                    selected = tab,
+                    onSelected = { tab = it },
+                    onHide = { navVisible = false },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(58.dp)
+                )
+            } else {
+                HiddenNavHandle(
+                    onShow = { navVisible = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactGameNav(
+    selected: GameTab,
+    onSelected: (GameTab) -> Unit,
+    onHide: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .background(Color(0xEE070D0B))
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        GameTab.entries.forEach { item ->
+            val active = selected == item
+            Button(
+                onClick = { onSelected(item) },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = ButtonDefaults.ContentPadding,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (active) Banana else Color.Transparent,
+                    contentColor = if (active) Night else Color(0xFF9EA8A3)
+                )
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(item.icon, item.label, modifier = Modifier.size(18.dp))
+                    Text(item.label, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                }
+            }
+        }
+        IconButton(
+            onClick = onHide,
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(44.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Panel)
+        ) {
+            Icon(Icons.Rounded.KeyboardArrowDown, "Hide menu", tint = InkMuted)
+        }
+    }
+}
+
+@Composable
+private fun HiddenNavHandle(onShow: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .background(Color(0xEE070D0B))
+            .padding(horizontal = 16.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(
+            onClick = onShow,
+            modifier = Modifier
+                .height(22.dp)
+                .width(56.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Panel)
+        ) {
+            Icon(Icons.Rounded.KeyboardArrowUp, "Show menu", tint = Banana, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -553,7 +839,7 @@ private fun CanopyApp(vm: GameViewModel = viewModel()) {
 enum class GameTab(val label: String, val icon: ImageVector) {
     Battle("Battle", Icons.Rounded.CatchingPokemon),
     Team("Team", Icons.Rounded.Groups),
-    Care("Care", Icons.Rounded.Favorite),
+    Backpack("Bag", Icons.Rounded.Backpack),
     Log("Log", Icons.Rounded.Article)
 }
 
@@ -562,23 +848,53 @@ private fun BattleScreen(
     state: GameState,
     onMove: (Int) -> Unit,
     onDefend: () -> Unit,
-    onCare: () -> Unit,
+    onUseItem: (String) -> Unit,
     onSwap: () -> Unit,
     onNext: () -> Unit,
     onReset: () -> Unit
 ) {
-    LazyColumn(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item { Header(state) }
-        item {
-            BattleArena(state)
+        Header(state)
+        BattleArena(
+            state = state,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(0.92f)
+        )
+        ActionPanel(
+            state = state,
+            onMove = onMove,
+            onDefend = onDefend,
+            onUseItem = onUseItem,
+            onSwap = onSwap,
+            onNext = onNext,
+            onReset = onReset,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1.08f)
+        )
+    }
+}
+
+@Composable
+private fun CompactHeader(state: GameState) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text("Canopy Duel", fontSize = 20.sp, lineHeight = 22.sp, fontWeight = FontWeight.Black, color = Ink)
+            Text("Turn ${state.turn}", color = InkMuted, fontSize = 12.sp)
         }
-        item {
-            ActionPanel(state, onMove, onDefend, onCare, onSwap, onNext, onReset)
+        Column(horizontalAlignment = Alignment.End) {
+            Text("Items", color = InkMuted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            Text(state.backpack.sumOf { it.count }.toString(), color = Banana, fontSize = 18.sp, fontWeight = FontWeight.Black)
         }
     }
 }
@@ -591,23 +907,27 @@ private fun Header(state: GameState) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("Canopy Duel", fontSize = 28.sp, lineHeight = 30.sp, fontWeight = FontWeight.Black, color = Ink)
-            Text("Turn ${state.turn} / offline AI battle", color = InkMuted, fontSize = 15.sp)
+            Text("Canopy Duel", fontSize = 24.sp, lineHeight = 26.sp, fontWeight = FontWeight.Black, color = Ink)
+            Text("Turn ${state.turn} / offline AI battle", color = InkMuted, fontSize = 13.sp)
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text("Bananas", color = InkMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text(state.bananas.toString(), color = Banana, fontSize = 24.sp, fontWeight = FontWeight.Black)
+            Text("Items", color = InkMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Text(state.backpack.sumOf { it.count }.toString(), color = Banana, fontSize = 21.sp, fontWeight = FontWeight.Black)
         }
     }
 }
 
 @Composable
-private fun BattleArena(state: GameState) {
-    Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
+private fun BattleArena(state: GameState, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        shape = RoundedCornerShape(8.dp)
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(330.dp)
+                .fillMaxHeight()
                 .background(Brush.verticalGradient(listOf(Color(0xFF233E36), Color(0xFF101715))))
         ) {
             Canvas(Modifier.fillMaxSize()) {
@@ -645,7 +965,7 @@ private fun FighterSlot(fighter: Fighter, trainerColor: Color, alignEnd: Boolean
     val hpProgress by animateFloatAsState(fighter.hp / fighter.maxHp.toFloat(), label = "${fighter.name}_hp")
     val energyProgress by animateFloatAsState(fighter.energy / fighter.maxEnergy.toFloat(), label = "${fighter.name}_energy")
     Row(
-        modifier = modifier.fillMaxWidth(0.86f),
+        modifier = modifier.fillMaxWidth(0.58f),
         horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -655,9 +975,9 @@ private fun FighterSlot(fighter: Fighter, trainerColor: Color, alignEnd: Boolean
             colors = CardDefaults.cardColors(containerColor = Color(0xDD111A16)),
             modifier = Modifier.weight(1f)
         ) {
-            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.padding(9.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                    Text(fighter.name, fontSize = 16.sp, fontWeight = FontWeight.Black)
+                    Text(fighter.name, fontSize = 15.sp, lineHeight = 16.sp, fontWeight = FontWeight.Black)
                     Text(fighter.element.label, color = fighter.element.color, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
                 Meter("HP", fighter.hp, fighter.maxHp, hpProgress, Threat)
@@ -674,7 +994,7 @@ private fun FighterSlot(fighter: Fighter, trainerColor: Color, alignEnd: Boolean
 
 @Composable
 private fun CreatureArt(fighter: Fighter, bob: Float) {
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(96.dp)) {
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(82.dp)) {
         Canvas(Modifier.fillMaxSize()) {
             drawCircle(fighter.element.color.copy(alpha = 0.18f), radius = size.minDimension * 0.44f)
         }
@@ -683,7 +1003,7 @@ private fun CreatureArt(fighter: Fighter, bob: Float) {
             contentDescription = fighter.name,
             contentScale = ContentScale.Fit,
             modifier = Modifier
-                .size(78.dp)
+                .size(66.dp)
                 .graphicsLayer {
                     translationY = bob
                     rotationZ = bob * 0.35f
@@ -729,22 +1049,44 @@ private fun ActionPanel(
     state: GameState,
     onMove: (Int) -> Unit,
     onDefend: () -> Unit,
-    onCare: () -> Unit,
+    onUseItem: (String) -> Unit,
     onSwap: () -> Unit,
     onNext: () -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(phaseText(state), color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Black)
-            Text("${state.lastPlayerAction}\n${state.lastAiAction}", color = InkMuted, fontSize = 12.sp, lineHeight = 16.sp)
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(phaseText(state), color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Black)
+            Text("${state.lastPlayerAction}\n${state.lastAiAction}", color = InkMuted, fontSize = 11.sp, lineHeight = 14.sp)
             if (state.phase == RoundPhase.PlayerChoice) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Banana)
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text("ATTACK", color = Night, fontSize = 12.sp, fontWeight = FontWeight.Black)
+                    }
+                    Text("Choose one move", color = InkMuted, fontSize = 12.sp)
+                }
                 state.player.active.moves.forEachIndexed { index, move ->
                     MoveButton(move, state.player.active, onClick = { onMove(index) })
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     BattleButton("Defend", "Guard + energy", onDefend, enabled = true, modifier = Modifier.weight(1f), color = Plum)
-                    BattleButton("Care", "1 banana", onCare, enabled = state.bananas > 0, modifier = Modifier.weight(1f), color = CanopyGreen)
+                    BattleButton("Use Item", firstItemLabel(state), { state.backpack.firstOrNull { it.count > 0 }?.let { onUseItem(it.item.id) } }, enabled = state.backpack.any { it.count > 0 }, modifier = Modifier.weight(1f), color = CanopyGreen)
                     BattleButton("Swap", "Partner", onSwap, enabled = state.player.roster.any { it != state.player.active && !it.isDown }, modifier = Modifier.weight(1f), color = RiverBlue)
                 }
             } else {
@@ -763,6 +1105,11 @@ private fun ActionPanel(
     }
 }
 
+private fun firstItemLabel(state: GameState): String {
+    val stack = state.backpack.firstOrNull { it.count > 0 } ?: return "Empty"
+    return "${stack.item.name} x${stack.count}"
+}
+
 @Composable
 private fun MoveButton(move: Move, fighter: Fighter, onClick: () -> Unit) {
     val cooldown = fighter.cooldowns[move.name] ?: 0
@@ -770,20 +1117,29 @@ private fun MoveButton(move: Move, fighter: Fighter, onClick: () -> Unit) {
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(54.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 52.dp),
         shape = RoundedCornerShape(8.dp),
+        contentPadding = ButtonDefaults.ContentPadding,
         colors = ButtonDefaults.buttonColors(containerColor = PanelHigh, contentColor = Ink)
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column {
-                Text(move.name, fontSize = 14.sp, fontWeight = FontWeight.Black)
-                Text(move.description, fontSize = 10.sp, color = InkMuted)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(move.element.color.copy(alpha = 0.2f))
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            ) {
+                Text("ATK", color = move.element.color, fontSize = 11.sp, fontWeight = FontWeight.Black)
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(move.name, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = FontWeight.Black)
+                Text(move.description, fontSize = 10.sp, lineHeight = 12.sp, color = InkMuted)
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(move.element.label, color = move.element.color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(if (cooldown > 0) "CD $cooldown" else "${move.energyCost} EN", fontSize = 10.sp, color = InkMuted)
+                Text(if (cooldown > 0) "CD $cooldown" else "${move.energyCost} EN", fontSize = 10.sp, lineHeight = 12.sp, color = InkMuted)
             }
         }
     }
@@ -794,13 +1150,14 @@ private fun BattleButton(title: String, subtitle: String, onClick: () -> Unit, e
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(54.dp),
+        modifier = modifier.heightIn(min = 50.dp),
         shape = RoundedCornerShape(8.dp),
+        contentPadding = ButtonDefaults.ContentPadding,
         colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Color.White)
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(title, fontSize = 13.sp, fontWeight = FontWeight.Black)
-            Text(subtitle, fontSize = 9.sp)
+            Text(title, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = FontWeight.Black)
+            Text(subtitle, fontSize = 9.sp, lineHeight = 11.sp)
         }
     }
 }
@@ -845,7 +1202,7 @@ private fun TrainerRoster(title: String, trainer: Trainer) {
 }
 
 @Composable
-private fun CareScreen(state: GameState, onCare: () -> Unit) {
+private fun BackpackScreen(state: GameState, onUseItem: (String) -> Unit) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -855,22 +1212,60 @@ private fun CareScreen(state: GameState, onCare: () -> Unit) {
         item { Header(state) }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Image(painterResource(state.player.active.art), state.player.active.name, modifier = Modifier.size(118.dp))
-                    Text("${state.player.active.name} needs care between attacks.", fontSize = 18.sp, fontWeight = FontWeight.Black, textAlign = TextAlign.Center)
-                    Text("Care is a real battle action: it heals, restores energy, clears common status, and spends one banana.", color = InkMuted, fontSize = 13.sp, lineHeight = 18.sp, textAlign = TextAlign.Center)
-                    Button(
-                        onClick = onCare,
-                        enabled = state.phase == RoundPhase.PlayerChoice && state.bananas > 0,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Banana, contentColor = Night)
-                    ) {
-                        Text("Banana Care", fontSize = 16.sp, fontWeight = FontWeight.Black)
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Image(painterResource(state.player.active.art), state.player.active.name, modifier = Modifier.size(74.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Backpack", fontSize = 20.sp, fontWeight = FontWeight.Black)
+                        Text("Use one item on ${state.player.active.name}. Items spend your turn, so the rival still acts.", color = InkMuted, fontSize = 12.sp, lineHeight = 16.sp)
                     }
                 }
+            }
+        }
+        items(state.backpack) { stack ->
+            BackpackItemCard(
+                stack = stack,
+                enabled = state.phase == RoundPhase.PlayerChoice && stack.count > 0,
+                onUseItem = onUseItem
+            )
+        }
+    }
+}
+
+@Composable
+private fun BackpackItemCard(stack: BagStack, enabled: Boolean, onUseItem: (String) -> Unit) {
+    val accent = when (stack.item.kind) {
+        BattleItemKind.HealHp -> Banana
+        BattleItemKind.HealStatus -> RiverBlue
+        BattleItemKind.FullRestore -> CanopyGreen
+        BattleItemKind.BoostAttack -> Threat
+    }
+    Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(accent.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("x${stack.count}", color = accent, fontSize = 14.sp, fontWeight = FontWeight.Black)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(stack.item.name, fontSize = 16.sp, fontWeight = FontWeight.Black)
+                Text(stack.item.description, color = InkMuted, fontSize = 12.sp, lineHeight = 16.sp)
+            }
+            Button(
+                onClick = { onUseItem(stack.item.id) },
+                enabled = enabled,
+                modifier = Modifier.height(46.dp),
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Night)
+            ) {
+                Text("Use", fontSize = 13.sp, fontWeight = FontWeight.Black)
             }
         }
     }

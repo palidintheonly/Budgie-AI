@@ -14,15 +14,15 @@ val keystoreProperties = Properties().apply {
 val hasReleaseKeystore = keystorePropertiesFile.exists()
 
 android {
-    namespace = "com.canopydominion.game"
+    namespace = "com.monkeymischief.game"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.canopydominion.game"
+        applicationId = "com.monkeymischief.game"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.3"
+        versionName = "0.0.5"
         manifestPlaceholders["appLabel"] = "Monkey Mischief"
     }
 
