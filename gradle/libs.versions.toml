@@ -6,6 +6,7 @@ sceneview = "4.15.2"
 composeMaterial3 = "1.4.0"
 composeMaterial = "1.7.8"
 composeUi = "1.11.2"
+playServicesAds = "25.3.0"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
@@ -18,5 +19,6 @@ compose-ui = { group = "androidx.compose.ui", name = "ui", version.ref = "compos
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview", version.ref = "composeUi" }
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling", version.ref = "composeUi" }
 androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics", version.ref = "composeUi" }
+play-services-ads = { group = "com.google.android.gms", name = "play-services-ads", version.ref = "playServicesAds" }
 
 [plugins]

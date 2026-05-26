@@ -85,5 +85,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.sceneview)
+    implementation(libs.play.services.ads)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

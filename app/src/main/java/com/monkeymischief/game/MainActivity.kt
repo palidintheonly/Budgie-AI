@@ -88,6 +88,13 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.sceneview.SceneView
 import io.github.sceneview.node.ModelNode
 import io.github.sceneview.rememberModelInstance
+import com.google.android.gms.ads.AdError
+import com.google.android.gms.ads.AdRequest
+import com.google.android.gms.ads.FullScreenContentCallback
+import com.google.android.gms.ads.LoadAdError
+import com.google.android.gms.ads.MobileAds
+import com.google.android.gms.ads.rewarded.RewardedAd
+import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -97,9 +104,66 @@ import kotlin.math.roundToInt
 import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
+    private var rewardedPackAd: RewardedAd? = null
+    private var rewardedPackLoading = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { CanopyTheme { CanopyApp() } }
+        MobileAds.initialize(this) {
+            loadRewardedPackAd()
+        }
+        setContent {
+            CanopyTheme {
+                CanopyApp(onShowRewardedPack = ::showRewardedPack)
+            }
+        }
+    }
+
+    private fun loadRewardedPackAd() {
+        if (rewardedPackLoading || rewardedPackAd != null) return
+        rewardedPackLoading = true
+        RewardedAd.load(
+            this,
+            RewardedPackAdUnitId,
+            AdRequest.Builder().build(),
+            object : RewardedAdLoadCallback() {
+                override fun onAdLoaded(ad: RewardedAd) {
+                    rewardedPackLoading = false
+                    rewardedPackAd = ad
+                    logVerbose("rewarded_pack_loaded adUnit=$RewardedPackAdUnitId")
+                }
+
+                override fun onAdFailedToLoad(error: LoadAdError) {
+                    rewardedPackLoading = false
+                    rewardedPackAd = null
+                    logVerbose("rewarded_pack_load_failed code=${error.code} message=${error.message}")
+                }
+            }
+        )
+    }
+
+    private fun showRewardedPack(onReward: (Int, String) -> Unit, onUnavailable: (String) -> Unit) {
+        val ad = rewardedPackAd
+        if (ad == null) {
+            loadRewardedPackAd()
+            onUnavailable("Reward ad is still loading.")
+            return
+        }
+        rewardedPackAd = null
+        ad.fullScreenContentCallback = object : FullScreenContentCallback() {
+            override fun onAdDismissedFullScreenContent() {
+                loadRewardedPackAd()
+            }
+
+            override fun onAdFailedToShowFullScreenContent(error: AdError) {
+                logVerbose("rewarded_pack_show_failed code=${error.code} message=${error.message}")
+                onUnavailable("Reward ad could not be shown.")
+                loadRewardedPackAd()
+            }
+        }
+        ad.show(this) { reward ->
+            onReward(reward.amount, reward.type)
+        }
     }
 }
 
@@ -121,6 +185,7 @@ private const val EnemyModelParrot = "models/enemies/animal-parrot.glb"
 private const val EnemyModelLion = "models/enemies/animal-lion.glb"
 private const val EnemyModelTiger = "models/enemies/animal-tiger.glb"
 private const val CoinsPerNpcDefeated = 18
+private const val RewardedPackAdUnitId = "ca-app-pub-7596383212906226/4425404702"
 
 @Composable
 private fun CanopyTheme(content: @Composable () -> Unit) {
@@ -313,6 +378,24 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         )
         logVerbose("store_buy itemId=$itemId price=${offer.price} coins=${state.coins}")
         syncState("store_buy")
+    }
+
+    fun grantRewardedPack(amount: Int, rewardType: String) {
+        val reward = amount.coerceAtLeast(0)
+        if (reward == 0) {
+            addLog("Reward ad finished, but no reward amount was returned.")
+            return
+        }
+        state = state.copy(
+            coins = state.coins + reward,
+            log = (listOf("Reward earned: $reward coins from $rewardType.") + state.log).take(12)
+        )
+        logVerbose("rewarded_pack_granted amount=$reward type=$rewardType coins=${state.coins}")
+        syncState("rewarded_pack")
+    }
+
+    fun addStoreMessage(message: String) {
+        addLog(message)
     }
 
     fun swap() {
@@ -1205,7 +1288,10 @@ private fun storeOffers() = listOf(
 )
 
 @Composable
-private fun CanopyApp(vm: GameViewModel = viewModel()) {
+private fun CanopyApp(
+    onShowRewardedPack: (onReward: (Int, String) -> Unit, onUnavailable: (String) -> Unit) -> Unit,
+    vm: GameViewModel = viewModel()
+) {
     var tab by remember { mutableStateOf(GameTab.Battle) }
     var navVisible by remember { mutableStateOf(true) }
     Surface(
@@ -1231,7 +1317,16 @@ private fun CanopyApp(vm: GameViewModel = viewModel()) {
                     GameTab.Battle -> BattleScreen(vm.state, vm::useMove, vm::defend, vm::useItem, vm::swap, vm::nextRound, vm::resetMatch)
                     GameTab.Team -> TeamScreen(vm.state)
                     GameTab.Backpack -> BackpackScreen(vm.state, vm::useItem)
-                    GameTab.Store -> StoreScreen(vm.state, vm::buyItem)
+                    GameTab.Store -> StoreScreen(
+                        state = vm.state,
+                        onBuyItem = vm::buyItem,
+                        onWatchRewardedPack = {
+                            onShowRewardedPack(
+                                vm::grantRewardedPack,
+                                { message -> vm.addStoreMessage(message) }
+                            )
+                        }
+                    )
                     GameTab.Log -> LogScreen(vm.state)
                 }
             }
@@ -1964,7 +2059,11 @@ private fun BackpackItemCard(stack: BagStack, enabled: Boolean, onUseItem: (Stri
 }
 
 @Composable
-private fun StoreScreen(state: GameState, onBuyItem: (String) -> Unit) {
+private fun StoreScreen(
+    state: GameState,
+    onBuyItem: (String) -> Unit,
+    onWatchRewardedPack: () -> Unit
+) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -1995,6 +2094,12 @@ private fun StoreScreen(state: GameState, onBuyItem: (String) -> Unit) {
                 }
             }
         }
+        item {
+            RewardedPackCard(
+                coins = state.coins,
+                onWatchRewardedPack = onWatchRewardedPack
+            )
+        }
         items(storeOffers()) { offer ->
             StoreOfferCard(
                 offer = offer,
@@ -2002,6 +2107,40 @@ private fun StoreScreen(state: GameState, onBuyItem: (String) -> Unit) {
                 coins = state.coins,
                 onBuyItem = onBuyItem
             )
+        }
+    }
+}
+
+@Composable
+private fun RewardedPackCard(coins: Int, onWatchRewardedPack: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(8.dp)) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(RiverBlue.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("+50", color = RiverBlue, fontSize = 15.sp, fontWeight = FontWeight.Black)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("Pack 1 Reward", fontSize = 16.sp, fontWeight = FontWeight.Black)
+                Text("Watch a rewarded ad to claim the configured coin pack.", color = InkMuted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("Coins now $coins", color = InkMuted, fontSize = 11.sp, lineHeight = 14.sp)
+            }
+            Button(
+                onClick = onWatchRewardedPack,
+                modifier = Modifier.height(46.dp),
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = RiverBlue, contentColor = Night)
+            ) {
+                Text("Watch", fontSize = 13.sp, fontWeight = FontWeight.Black)
+            }
         }
     }
 }
