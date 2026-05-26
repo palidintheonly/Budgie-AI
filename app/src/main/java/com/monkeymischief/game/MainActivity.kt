@@ -530,7 +530,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
                     .put("password", password)
                     .put("deviceId", deviceId)
                     .put("client", "android")
-                    .put("version", "0.0.10-alpha")
+                    .put("version", "0.0.11-alpha")
                     .toString()
                 val connection = (URL("$BackendBaseUrl/v1/auth/$action").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
