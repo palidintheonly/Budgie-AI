@@ -26,8 +26,8 @@ android {
         applicationId = "com.monkeymischief.game"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.6"
+        versionCode = 9
+        versionName = "0.0.9"
         manifestPlaceholders["appLabel"] = "Monkey Mischief"
     }
 
@@ -76,13 +76,14 @@ android {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2026.04.01"))
-    implementation("androidx.activity:activity-compose:1.11.0")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.material)
+    implementation(libs.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.sceneview)
+    debugImplementation(libs.androidx.compose.ui.tooling)
 }

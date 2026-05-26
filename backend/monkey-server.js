@@ -6,8 +6,15 @@ const crypto = require('crypto');
 const SERVER_ID = 'b27bbaac-028f-4717-bfcd-3e78cf1475bc';
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 5063);
 const TOKEN = process.env.MONKEY_API_TOKEN || 'MonkeyMischief-0.0.4-alpha-b27bbaac';
-const DATA_DIR = process.env.MONKEY_DB_DIR || path.join(__dirname, '..', 'json-db');
-const DB_FILE = path.join(DATA_DIR, 'database.json');
+const DATA_DIR = process.env.MONKEY_DB_DIR || path.join(__dirname, '..', 'db');
+const DB_FILES = {
+  meta: path.join(DATA_DIR, 'meta.json'),
+  accounts: path.join(DATA_DIR, 'accounts.json'),
+  users: path.join(DATA_DIR, 'users.json'),
+  devices: path.join(DATA_DIR, 'devices.json'),
+  events: path.join(DATA_DIR, 'events.json'),
+  statesDir: path.join(DATA_DIR, 'states')
+};
 const MAX_BODY = 256 * 1024;
 
 function log(event, data = {}) {
@@ -18,61 +25,114 @@ function meta(req, url) {
   return { method: req.method, path: url.pathname, remote: req.socket?.remoteAddress || null, userAgent: req.headers['user-agent'] || null };
 }
 
-function emptyDb(extra = {}) {
-  return { schemaVersion: 2, serverId: SERVER_ID, createdAt: new Date().toISOString(), users: {}, devices: {}, states: {}, events: [], ...extra };
-}
-
-function normalizeDb(db) {
-  db.schemaVersion = Math.max(Number(db.schemaVersion || 1), 2);
-  db.serverId = db.serverId || SERVER_ID;
-  db.createdAt = db.createdAt || new Date().toISOString();
-  db.users = db.users && typeof db.users === 'object' ? db.users : {};
-  db.devices = db.devices && typeof db.devices === 'object' ? db.devices : {};
-  db.states = db.states && typeof db.states === 'object' ? db.states : {};
-  db.events = Array.isArray(db.events) ? db.events : [];
-  return db;
-}
-
-function writeDb(db) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const normal = normalizeDb(db);
-  const tmp = `${DB_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(normal, null, 2));
-  fs.renameSync(tmp, DB_FILE);
-  log('db_write', {
-    dbFile: DB_FILE,
-    userCount: Object.keys(normal.users).length,
-    deviceCount: Object.keys(normal.devices).length,
-    stateCount: Object.keys(normal.states).length,
-    eventCount: normal.events.length
-  });
-}
-
 function ensureDb() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DB_FILE)) writeDb(emptyDb());
+  fs.mkdirSync(DB_FILES.statesDir, { recursive: true });
+  if (!fs.existsSync(DB_FILES.meta)) writeJson(DB_FILES.meta, { schemaVersion: 4, serverId: SERVER_ID, createdAt: new Date().toISOString() });
+  if (!fs.existsSync(DB_FILES.accounts)) writeJson(DB_FILES.accounts, {});
+  if (!fs.existsSync(DB_FILES.users)) writeJson(DB_FILES.users, {});
+  if (!fs.existsSync(DB_FILES.devices)) writeJson(DB_FILES.devices, {});
+  if (!fs.existsSync(DB_FILES.events)) writeJson(DB_FILES.events, []);
+  migrateLegacyDb();
+}
+
+function migrateLegacyDb() {
+  const legacyFile = path.join(__dirname, '..', 'json-db', 'database.json');
+  if (!fs.existsSync(legacyFile)) return;
+  if (listStateSlots().length > 0 || Object.keys(readJson(DB_FILES.users, {})).length > 0) return;
+  try {
+    const legacy = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
+    writeJson(DB_FILES.meta, {
+      schemaVersion: 4,
+      serverId: legacy.serverId || SERVER_ID,
+      createdAt: legacy.createdAt || new Date().toISOString(),
+      migratedFrom: legacyFile,
+      migratedAt: new Date().toISOString()
+    });
+    writeJson(DB_FILES.accounts, legacy.accounts && typeof legacy.accounts === 'object' ? legacy.accounts : {});
+    writeJson(DB_FILES.users, legacy.users && typeof legacy.users === 'object' ? legacy.users : {});
+    writeJson(DB_FILES.devices, legacy.devices && typeof legacy.devices === 'object' ? legacy.devices : {});
+    writeJson(DB_FILES.events, Array.isArray(legacy.events) ? legacy.events.slice(0, 200) : []);
+    const states = legacy.states && typeof legacy.states === 'object' ? legacy.states : {};
+    for (const [slot, state] of Object.entries(states)) writeJson(stateFile(slot), state);
+    log('legacy_db_migrated', { legacyFile, stateCount: Object.keys(states).length });
+  } catch (error) {
+    log('legacy_db_migration_failed', { legacyFile, error: error.message });
+  }
+}
+
+function readJson(file, fallback) {
+  ensureParent(file);
+  if (!fs.existsSync(file)) return fallback;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    const backup = `${file}.broken-${Date.now()}`;
+    fs.renameSync(file, backup);
+    log('json_recovered', { file, backup, error: error.message });
+    writeJson(file, fallback);
+    return fallback;
+  }
+}
+
+function writeJson(file, value) {
+  ensureParent(file);
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+function ensureParent(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+}
+
+function stateFile(slot) {
+  return path.join(DB_FILES.statesDir, `${cleanId(slot, 'default')}.json`);
+}
+
+function listStateSlots() {
+  fs.mkdirSync(DB_FILES.statesDir, { recursive: true });
+  return fs.readdirSync(DB_FILES.statesDir)
+    .filter(name => name.endsWith('.json'))
+    .map(name => path.basename(name, '.json'));
 }
 
 function readDb() {
   ensureDb();
-  try {
-    const db = normalizeDb(JSON.parse(fs.readFileSync(DB_FILE, 'utf8')));
-    log('db_read', {
-      dbFile: DB_FILE,
-      userCount: Object.keys(db.users).length,
-      deviceCount: Object.keys(db.devices).length,
-      stateCount: Object.keys(db.states).length,
-      eventCount: db.events.length
-    });
-    return db;
-  } catch (error) {
-    const backup = `${DB_FILE}.broken-${Date.now()}`;
-    fs.renameSync(DB_FILE, backup);
-    const db = emptyDb({ recoveredFrom: backup });
-    writeDb(db);
-    log('db_recovered', { dbFile: DB_FILE, backup, error: error.message });
-    return db;
-  }
+  const db = {
+    meta: readJson(DB_FILES.meta, { schemaVersion: 4, serverId: SERVER_ID, createdAt: new Date().toISOString() }),
+    accounts: readJson(DB_FILES.accounts, {}),
+    users: readJson(DB_FILES.users, {}),
+    devices: readJson(DB_FILES.devices, {}),
+    events: readJson(DB_FILES.events, [])
+  };
+  db.meta.schemaVersion = Math.max(Number(db.meta.schemaVersion || 1), 4);
+  db.meta.serverId = db.meta.serverId || SERVER_ID;
+  db.meta.createdAt = db.meta.createdAt || new Date().toISOString();
+  db.accounts = db.accounts && typeof db.accounts === 'object' ? db.accounts : {};
+  db.users = db.users && typeof db.users === 'object' ? db.users : {};
+  db.devices = db.devices && typeof db.devices === 'object' ? db.devices : {};
+  db.events = Array.isArray(db.events) ? db.events : [];
+  db.states = {};
+  for (const slot of listStateSlots()) db.states[slot] = readJson(stateFile(slot), null);
+  return db;
+}
+
+function writeDb(db) {
+  ensureDb();
+  writeJson(DB_FILES.meta, db.meta || { schemaVersion: 4, serverId: SERVER_ID, createdAt: new Date().toISOString() });
+  writeJson(DB_FILES.accounts, db.accounts || {});
+  writeJson(DB_FILES.users, db.users || {});
+  writeJson(DB_FILES.devices, db.devices || {});
+  writeJson(DB_FILES.events, Array.isArray(db.events) ? db.events.slice(0, 200) : []);
+  for (const [slot, state] of Object.entries(db.states || {})) writeJson(stateFile(slot), state);
+  log('db_write', {
+    dbDir: DATA_DIR,
+    userCount: Object.keys(db.users || {}).length,
+    deviceCount: Object.keys(db.devices || {}).length,
+    stateCount: Object.keys(db.states || {}).length,
+    eventCount: (db.events || []).length
+  });
 }
 
 function send(res, status, payload) {
@@ -133,6 +193,18 @@ function userIdForDevice(deviceId) {
   return `user_${crypto.createHash('sha256').update(deviceId).digest('hex').slice(0, 16)}`;
 }
 
+function cleanUsername(value) {
+  return cleanId(value, null)?.replace(/[_.-]+$/g, '').slice(0, 32) || null;
+}
+
+function hashPassword(password, salt) {
+  return crypto.createHash('sha256').update(`${salt}:${password}`).digest('hex');
+}
+
+function userIdForUsername(username) {
+  return `user_${crypto.createHash('sha256').update(username).digest('hex').slice(0, 16)}`;
+}
+
 function slotFromUrl(url) {
   const parts = url.pathname.split('/').filter(Boolean);
   return cleanId(decodeURIComponent(parts[2] || 'default'), 'default').slice(0, 64);
@@ -143,7 +215,7 @@ function linkDevice(db, payload, now) {
   if (!deviceId) return { userId: cleanId(payload.userId, null), deviceId: null, isNew: false };
 
   const existing = db.devices[deviceId];
-  const userId = existing?.userId || cleanId(payload.userId, null) || userIdForDevice(deviceId);
+  const userId = cleanId(payload.userId, null) || existing?.userId || userIdForDevice(deviceId);
   const isNew = !existing;
   db.users[userId] = {
     userId,
@@ -161,6 +233,62 @@ function linkDevice(db, payload, now) {
     lastSeenAt: now
   };
   return { userId, deviceId, isNew };
+}
+
+async function authenticate(req, res, mode) {
+  if (!requireToken(req, res)) return;
+  try {
+    const payload = await readBody(req);
+    const username = cleanUsername(payload.username);
+    const password = String(payload.password || '');
+    if (!username || username.length < 3) return send(res, 400, { ok: false, error: 'bad_username' });
+    if (password.length < 6) return send(res, 400, { ok: false, error: 'bad_password' });
+
+    const now = new Date().toISOString();
+    const db = readDb();
+    const existing = db.accounts[username];
+    if (mode === 'signup' && existing) return send(res, 409, { ok: false, error: 'account_exists' });
+    if (mode === 'login' && !existing) return send(res, 404, { ok: false, error: 'account_missing' });
+
+    const account = existing || {
+      username,
+      userId: userIdForUsername(username),
+      salt: crypto.randomBytes(12).toString('hex'),
+      createdAt: now
+    };
+    const passwordHash = hashPassword(password, account.salt);
+    if (existing && existing.passwordHash !== passwordHash) return send(res, 401, { ok: false, error: 'bad_credentials' });
+
+    account.passwordHash = passwordHash;
+    account.lastLoginAt = now;
+    db.accounts[username] = account;
+    const linked = linkDevice(db, { ...payload, userId: account.userId }, now);
+    db.users[account.userId] = {
+      ...(db.users[account.userId] || {}),
+      userId: account.userId,
+      displayName: username,
+      createdAt: db.users[account.userId]?.createdAt || now,
+      lastSeenAt: now,
+      deviceIds: Array.from(new Set([...(db.users[account.userId]?.deviceIds || []), linked.deviceId].filter(Boolean)))
+    };
+    db.events.unshift({
+      at: now,
+      slot: `auth:${username}`,
+      reason: mode === 'signup' ? 'account_created' : 'account_login',
+      userId: account.userId,
+      deviceId: linked.deviceId,
+      client: payload.client || 'android',
+      version: payload.version || null,
+      phase: null,
+      turn: null
+    });
+    db.events = db.events.slice(0, 200);
+    writeDb(db);
+    return send(res, 200, { ok: true, username, userId: account.userId, deviceId: linked.deviceId });
+  } catch (error) {
+    log('auth_failed', { mode, error: error.message });
+    return send(res, 400, { ok: false, error: error.message });
+  }
 }
 
 async function registerDevice(req, res) {
@@ -209,7 +337,8 @@ const server = http.createServer(async (req, res) => {
       service: 'monkey-mischief-json-db',
       serverId: SERVER_ID,
       port: PORT,
-      dbFile: DB_FILE,
+      dbDir: DATA_DIR,
+      dbFiles: DB_FILES,
       userCount: Object.keys(db.users).length,
       deviceCount: Object.keys(db.devices).length,
       stateCount: Object.keys(db.states).length,
@@ -219,6 +348,14 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/v1/users/register') {
     return registerDevice(req, res);
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/auth/signup') {
+    return authenticate(req, res, 'signup');
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/auth/login') {
+    return authenticate(req, res, 'login');
   }
 
   if (url.pathname.startsWith('/v1/game/')) {
@@ -270,5 +407,5 @@ const server = http.createServer(async (req, res) => {
 process.on('uncaughtException', error => log('uncaught_exception', { error: error.stack || error.message }));
 process.on('unhandledRejection', error => log('unhandled_rejection', { error: error?.stack || error?.message || String(error) }));
 ensureDb();
-log('server_boot', { serverId: SERVER_ID, port: PORT, dataDir: DATA_DIR, dbFile: DB_FILE });
-server.listen(PORT, '0.0.0.0', () => log('server_listening', { port: PORT, dbFile: DB_FILE }));
+log('server_boot', { serverId: SERVER_ID, port: PORT, dataDir: DATA_DIR, dbFiles: DB_FILES });
+server.listen(PORT, '0.0.0.0', () => log('server_listening', { port: PORT, dataDir: DATA_DIR }));
