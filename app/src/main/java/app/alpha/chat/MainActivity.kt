@@ -1,4 +1,4 @@
-package com.monkeymischief.game
+package app.alpha.chat
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
