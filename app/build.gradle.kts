@@ -22,8 +22,8 @@ android {
         applicationId = "com.monkeymischief.game"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.11"
+        versionCode = 2
+        versionName = "0.0.12"
         manifestPlaceholders["appLabel"] = "Monkey Mischief"
     }
 
@@ -58,12 +58,18 @@ android {
         }
         create("alpha") {
             initWith(getByName("debug"))
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             applicationIdSuffix = ".alpha"
             versionNameSuffix = "-alpha"
             manifestPlaceholders["appLabel"] = "Monkey Mischief Alpha"
         }
         create("beta") {
             initWith(getByName("debug"))
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             applicationIdSuffix = ".beta"
             versionNameSuffix = "-beta"
             manifestPlaceholders["appLabel"] = "Monkey Mischief Beta"
