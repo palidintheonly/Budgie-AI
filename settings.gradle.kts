@@ -17,5 +17,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Monkey Mischief"
+rootProject.name = "Alpha"
 include(":app")

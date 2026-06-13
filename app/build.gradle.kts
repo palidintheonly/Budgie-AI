@@ -24,7 +24,7 @@ android {
         targetSdk = 36
         versionCode = 2
         versionName = "0.0.12"
-        manifestPlaceholders["appLabel"] = "Monkey Mischief"
+        manifestPlaceholders["appLabel"] = "Alpha"
     }
 
     buildFeatures {
@@ -47,14 +47,14 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            manifestPlaceholders["appLabel"] = "Monkey Mischief Debug"
+            manifestPlaceholders["appLabel"] = "Alpha Debug"
         }
         release {
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
             }
             isMinifyEnabled = false
-            manifestPlaceholders["appLabel"] = "Monkey Mischief"
+            manifestPlaceholders["appLabel"] = "Alpha"
         }
         create("alpha") {
             initWith(getByName("debug"))
@@ -63,7 +63,7 @@ android {
             }
             applicationIdSuffix = ".alpha"
             versionNameSuffix = "-alpha"
-            manifestPlaceholders["appLabel"] = "Monkey Mischief Alpha"
+            manifestPlaceholders["appLabel"] = "Alpha"
         }
         create("beta") {
             initWith(getByName("debug"))
@@ -72,7 +72,7 @@ android {
             }
             applicationIdSuffix = ".beta"
             versionNameSuffix = "-beta"
-            manifestPlaceholders["appLabel"] = "Monkey Mischief Beta"
+            manifestPlaceholders["appLabel"] = "Alpha Beta"
         }
     }
 }
@@ -86,7 +86,5 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.sceneview)
-    implementation(libs.play.services.ads)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
