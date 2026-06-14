@@ -28,7 +28,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.3-alpha"
+        versionName = "0.0.4-alpha"
         buildConfigField("String", "OPENROUTER_API_KEY", "\"${localString("OPENROUTER_API_KEY")}\"")
         buildConfigField("String", "OPENROUTER_MODEL", "\"google/gemma-4-31b-it:free\"")
         for (slot in 2..4) {
