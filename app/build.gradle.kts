@@ -11,6 +11,13 @@ val keystoreProperties = Properties().apply {
         keystorePropertiesFile.inputStream().use(::load)
     }
 }
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use(::load)
+}
+fun localString(name: String): String = localProperties.getProperty(name, "")
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
 
 android {
     namespace = "app.alpha.chat"
@@ -21,10 +28,19 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.1-alpha"
+        versionName = "0.0.3-alpha"
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"${localString("OPENROUTER_API_KEY")}\"")
+        buildConfigField("String", "OPENROUTER_MODEL", "\"google/gemma-4-31b-it:free\"")
+        for (slot in 2..4) {
+            buildConfigField("String", "PROVIDER_${slot}_NAME", "\"${localString("PROVIDER_${slot}_NAME")}\"")
+            buildConfigField("String", "PROVIDER_${slot}_ENDPOINT", "\"${localString("PROVIDER_${slot}_ENDPOINT")}\"")
+            buildConfigField("String", "PROVIDER_${slot}_MODEL", "\"${localString("PROVIDER_${slot}_MODEL")}\"")
+            buildConfigField("String", "PROVIDER_${slot}_API_KEY", "\"${localString("PROVIDER_${slot}_API_KEY")}\"")
+        }
     }
 
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 

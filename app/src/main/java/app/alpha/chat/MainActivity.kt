@@ -1,6 +1,8 @@
 package app.alpha.chat
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -54,6 +56,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 
 private val Ink = Color(0xFF161719)
 private val Paper = Color(0xFFF7F7F5)
@@ -77,12 +84,139 @@ private data class ChatMessage(
     val text: String,
 )
 
+private data class AiProvider(
+    val name: String,
+    val endpoint: String,
+    val model: String,
+    val apiKey: String,
+)
+
+private data class ChatReply(val text: String, val providerName: String)
+
+private object AiClient {
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val providers: List<AiProvider>
+        get() = listOf(
+            AiProvider(
+                name = "Gemma 4 31B",
+                endpoint = "https://openrouter.ai/api/v1/chat/completions",
+                model = BuildConfig.OPENROUTER_MODEL,
+                apiKey = BuildConfig.OPENROUTER_API_KEY,
+            ),
+            AiProvider(
+                name = "Hermes 3 405B",
+                endpoint = "https://openrouter.ai/api/v1/chat/completions",
+                model = "nousresearch/hermes-3-llama-3.1-405b:free",
+                apiKey = BuildConfig.OPENROUTER_API_KEY,
+            ),
+            AiProvider(
+                name = "OpenRouter Free Router",
+                endpoint = "https://openrouter.ai/api/v1/chat/completions",
+                model = "openrouter/free",
+                apiKey = BuildConfig.OPENROUTER_API_KEY,
+            ),
+            AiProvider(
+                BuildConfig.PROVIDER_2_NAME,
+                BuildConfig.PROVIDER_2_ENDPOINT,
+                BuildConfig.PROVIDER_2_MODEL,
+                BuildConfig.PROVIDER_2_API_KEY,
+            ),
+            AiProvider(
+                BuildConfig.PROVIDER_3_NAME,
+                BuildConfig.PROVIDER_3_ENDPOINT,
+                BuildConfig.PROVIDER_3_MODEL,
+                BuildConfig.PROVIDER_3_API_KEY,
+            ),
+            AiProvider(
+                BuildConfig.PROVIDER_4_NAME,
+                BuildConfig.PROVIDER_4_ENDPOINT,
+                BuildConfig.PROVIDER_4_MODEL,
+                BuildConfig.PROVIDER_4_API_KEY,
+            ),
+        ).filter { provider ->
+            provider.name.isNotBlank() &&
+                provider.endpoint.isNotBlank() &&
+                provider.model.isNotBlank() &&
+                provider.apiKey.isNotBlank()
+        }
+
+    fun send(messages: List<ChatMessage>, callback: (Result<ChatReply>) -> Unit) {
+        executor.execute {
+            val result = runCatching { requestWithFallback(messages) }
+            mainHandler.post { callback(result) }
+        }
+    }
+
+    private fun requestWithFallback(messages: List<ChatMessage>): ChatReply {
+        check(providers.isNotEmpty()) { "No AI provider is configured." }
+        val failures = mutableListOf<String>()
+        providers.forEach { provider ->
+            try {
+                return ChatReply(request(provider, messages), provider.name)
+            } catch (error: Exception) {
+                failures += "${provider.name}: ${error.message ?: "request failed"}"
+            }
+        }
+        error("All AI providers failed. ${failures.joinToString(" | ")}")
+    }
+
+    private fun request(provider: AiProvider, messages: List<ChatMessage>): String {
+        val requestBody = JSONObject().apply {
+            put("model", provider.model)
+            put("messages", JSONArray().apply {
+                messages.forEach { message ->
+                    put(JSONObject().apply {
+                        put("role", if (message.role == MessageRole.USER) "user" else "assistant")
+                        put("content", message.text)
+                    })
+                }
+            })
+        }.toString()
+
+        val connection = (URL(provider.endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 30_000
+            readTimeout = 90_000
+            doOutput = true
+            setRequestProperty("Authorization", "Bearer ${provider.apiKey}")
+            setRequestProperty("Content-Type", "application/json")
+        }
+
+        return try {
+            connection.outputStream.bufferedWriter().use { it.write(requestBody) }
+            val stream = if (connection.responseCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream
+            }
+            val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val response = JSONObject(responseText.ifBlank { "{}" })
+            if (connection.responseCode !in 200..299) {
+                val message = response.optJSONObject("error")?.optString("message")
+                    ?: "Request failed (${connection.responseCode})."
+                error(message)
+            }
+            response.getJSONArray("choices")
+                .getJSONObject(0)
+                .getJSONObject("message")
+                .getString("content")
+                .trim()
+                .ifBlank { error("The model returned an empty response.") }
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatApp() {
     val messages = remember { mutableStateListOf<ChatMessage>() }
     var draft by rememberSaveable { mutableStateOf("") }
     var isWaiting by rememberSaveable { mutableStateOf(false) }
+    var activeProvider by rememberSaveable { mutableStateOf("Gemma 4 31B") }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size, isWaiting) {
@@ -98,15 +232,22 @@ private fun ChatApp() {
     fun sendMessage() {
         val text = draft.trim()
         if (text.isEmpty() || isWaiting) return
-        messages += ChatMessage(System.nanoTime(), MessageRole.USER, text)
+        val userMessage = ChatMessage(System.nanoTime(), MessageRole.USER, text)
+        messages += userMessage
         draft = ""
         isWaiting = true
-        messages += ChatMessage(
-            id = System.nanoTime(),
-            role = MessageRole.ASSISTANT,
-            text = "The AI connection will be added in the next build step.",
-        )
-        isWaiting = false
+        AiClient.send(messages.toList()) { result ->
+            val reply = result.getOrNull()
+            if (reply != null) activeProvider = reply.providerName
+            messages += ChatMessage(
+                id = System.nanoTime(),
+                role = MessageRole.ASSISTANT,
+                text = reply?.text
+                    ?: result.exceptionOrNull()?.message
+                    ?: "Unable to get a response.",
+            )
+            isWaiting = false
+        }
     }
 
     Scaffold(
@@ -115,8 +256,8 @@ private fun ChatApp() {
             TopAppBar(
                 title = {
                     Column {
-                        Text("Alpha", fontWeight = FontWeight.SemiBold)
-                        Text("Chat prototype", color = Muted, fontSize = 12.sp)
+                        Text("Chat", fontWeight = FontWeight.SemiBold)
+                        Text("Using $activeProvider", color = Muted, fontSize = 12.sp)
                     }
                 },
                 actions = {
