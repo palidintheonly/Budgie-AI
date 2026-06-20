@@ -30,6 +30,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.android.gms.ads.AdError
+import com.google.android.gms.ads.AdRequest
+import com.google.android.gms.ads.FullScreenContentCallback
+import com.google.android.gms.ads.LoadAdError
+import com.google.android.gms.ads.MobileAds
+import com.google.android.gms.ads.interstitial.InterstitialAd
+import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -131,9 +139,20 @@ private val AssistantBubble = Color(0xFF111113)
 private const val PrimaryProviderName = "OpenRouter Free Router"
 
 class MainActivity : ComponentActivity() {
+    private val adHandler = Handler(Looper.getMainLooper())
+    private val interstitialTick = object : Runnable {
+        override fun run() {
+            AdMobInterstitials.showIfReady(this@MainActivity)
+            adHandler.postDelayed(this, 2 * 60 * 1000L)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        FirebaseEvents.log(this, "app_opened")
+        AdMobInterstitials.initialize(this)
+        adHandler.postDelayed(interstitialTick, 2 * 60 * 1000L)
         ReminderScheduler.ensureNotificationChannel(this)
         ReminderScheduler.scheduleHourly(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -142,6 +161,74 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2001)
         }
         setContent { AlphaTheme { ChatApp() } }
+    }
+
+    override fun onDestroy() {
+        adHandler.removeCallbacks(interstitialTick)
+        super.onDestroy()
+    }
+}
+
+private object AdMobInterstitials {
+    private const val AD_UNIT_ID = "ca-app-pub-7596383212906226/8775513566"
+    private var interstitialAd: InterstitialAd? = null
+    private var isLoading = false
+
+    fun initialize(activity: MainActivity) {
+        Thread {
+            MobileAds.initialize(activity) {
+                Handler(Looper.getMainLooper()).post { load(activity) }
+            }
+        }.start()
+    }
+
+    fun showIfReady(activity: MainActivity) {
+        val ad = interstitialAd
+        if (ad == null) {
+            load(activity)
+            return
+        }
+        interstitialAd = null
+        ad.fullScreenContentCallback = object : FullScreenContentCallback() {
+            override fun onAdDismissedFullScreenContent() {
+                load(activity)
+            }
+
+            override fun onAdFailedToShowFullScreenContent(adError: AdError) {
+                load(activity)
+            }
+        }
+        ad.show(activity)
+    }
+
+    private fun load(activity: MainActivity) {
+        if (isLoading || interstitialAd != null) return
+        isLoading = true
+        InterstitialAd.load(
+            activity,
+            AD_UNIT_ID,
+            AdRequest.Builder().build(),
+            object : InterstitialAdLoadCallback() {
+                override fun onAdLoaded(ad: InterstitialAd) {
+                    interstitialAd = ad
+                    isLoading = false
+                }
+
+                override fun onAdFailedToLoad(error: LoadAdError) {
+                    interstitialAd = null
+                    isLoading = false
+                }
+            },
+        )
+    }
+}
+
+private object FirebaseEvents {
+    fun log(context: Context, name: String, params: Bundle.() -> Unit = {}) {
+        runCatching {
+            val bundle = Bundle().apply(params)
+            FirebaseAnalytics.getInstance(context).logEvent(name, bundle)
+        }
     }
 }
 
@@ -207,6 +294,7 @@ private object ReminderScheduler {
 
         ensureNotificationChannel(context)
         val message = ReminderContent.generate()
+        FirebaseEvents.log(context, "reminder_notification_shown")
         val launchIntent = PendingIntent.getActivity(
             context,
             0,
@@ -340,6 +428,46 @@ private class ConversationStore(context: Context) {
     }
 }
 
+private class MemoryStore(context: Context) {
+    private val preferences = context.getSharedPreferences("budgie_memory", Context.MODE_PRIVATE)
+
+    @Synchronized
+    fun load(): List<String> = runCatching {
+        val array = JSONArray(preferences.getString("facts", "[]"))
+        buildList {
+            for (index in 0 until array.length()) {
+                val value = array.optString(index).trim()
+                if (value.isNotBlank()) add(value)
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    @Synchronized
+    fun learnFromUserMessage(text: String) {
+        val facts = extractMemoryFacts(text)
+        if (facts.isEmpty()) return
+        val merged = (load() + facts).distinctBy { it.lowercase() }.takeLast(24)
+        preferences.edit().putString("facts", JSONArray(merged).toString()).apply()
+    }
+
+    private fun extractMemoryFacts(text: String): List<String> {
+        val trimmed = text.trim().replace(Regex("\\s+"), " ")
+        if (trimmed.length !in 4..240) return emptyList()
+
+        val patterns = listOf(
+            Regex("""(?i)\bmy name is ([A-Za-z][A-Za-z0-9 _'-]{1,40})""") to "User name: ",
+            Regex("""(?i)\bcall me ([A-Za-z][A-Za-z0-9 _'-]{1,40})""") to "Preferred name: ",
+            Regex("""(?i)\bi prefer ([^.?!]{2,120})""") to "User preference: ",
+            Regex("""(?i)\bi like ([^.?!]{2,120})""") to "User likes: ",
+            Regex("""(?i)\bi am ([^.?!]{2,120})""") to "User detail: ",
+            Regex("""(?i)\bi'm ([^.?!]{2,120})""") to "User detail: ",
+        )
+        return patterns.mapNotNull { (pattern, prefix) ->
+            pattern.find(trimmed)?.groupValues?.getOrNull(1)?.trim()?.trim('.', ',', ';')?.takeIf { it.isNotBlank() }?.let { "$prefix$it" }
+        }
+    }
+}
+
 private fun Conversation.toJson() = JSONObject().apply {
     put("id", id)
     put("title", title)
@@ -389,6 +517,7 @@ private data class AiProvider(
     val endpoint: String,
     val model: String,
     val apiKey: String,
+    val supportsImages: Boolean = false,
 )
 
 private data class ChatReply(
@@ -434,13 +563,13 @@ private object WebTools {
         buildString {
             appendLine("Tool results for ${request.kind.label}: ${request.query}")
             if (results.isEmpty()) {
-                append("No results found.")
+                append(fallbackResult(request))
             } else {
                 results.forEach { appendLine(it).appendLine() }
             }
         }
     }.getOrElse { error ->
-        "Tool results for ${request.kind.label}: ${request.query}\nSearch failed: ${error.message ?: "unknown error"}"
+        "Tool results for ${request.kind.label}: ${request.query}\n${fallbackResult(request)}\nSearch note: ${error.message ?: "lookup unavailable"}"
     }
 
     private fun httpGet(url: String): String {
@@ -480,6 +609,25 @@ private object WebTools {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .trim()
+
+    private fun fallbackResult(request: SearchRequest): String {
+        val query = request.query.trim()
+        val directUrl = directUrl(query)
+        return when {
+            directUrl != null -> "Direct result:\n$directUrl\nSearch lookup was limited, but this looks like the requested site."
+            request.kind == SearchKind.IMAGE -> "No image results were available from the in-app search provider. Try a more specific image query."
+            else -> "No web results were available from the in-app search provider. Try a more specific query or include a direct URL."
+        }
+    }
+
+    private fun directUrl(query: String): String? {
+        val token = query.split(Regex("\\s+"))
+            .firstOrNull { it.contains(".") }
+            ?.trim(',', '.', ';', ':', '"', '\'')
+            ?: return null
+        val withScheme = if (token.startsWith("http://") || token.startsWith("https://")) token else "https://$token"
+        return runCatching { URI(withScheme).toString() }.getOrNull()
+    }
 }
 
 private fun parseSearchRequest(text: String): SearchRequest? {
@@ -500,6 +648,17 @@ private fun directSearchRequest(text: String): SearchRequest? {
     }?.takeIf { it.query.isNotBlank() }
 }
 
+private fun cleanProviderText(text: String): String {
+    val trimmed = text.trim()
+    val safetyOnly = Regex(
+        """(?is)^\s*User Safety:\s*(safe|unsafe)\s*Response Safety:\s*(safe|unsafe)(\s*Safety Categories:\s*.+?)?\s*$""",
+    )
+    if (safetyOnly.matches(trimmed)) {
+        return "I could not get a usable answer from the current free router for that request. Try rephrasing it with a little more detail."
+    }
+    return trimmed
+}
+
 private object AiClient {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -515,20 +674,20 @@ private object AiClient {
             ),
         ).filter { it.name.isNotBlank() && it.endpoint.isNotBlank() && it.model.isNotBlank() && it.apiKey.isNotBlank() }
 
-    fun send(context: Context, messages: List<ChatMessage>, callback: (Result<ChatReply>) -> Unit) {
+    fun send(context: Context, memories: List<String>, messages: List<ChatMessage>, callback: (Result<ChatReply>) -> Unit) {
         val appContext = context.applicationContext
         executor.execute {
-            val result = runCatching { requestWithFallback(appContext, messages) }
+            val result = runCatching { requestWithFallback(appContext, memories, messages) }
             mainHandler.post { callback(result) }
         }
     }
 
-    private fun requestWithFallback(context: Context, messages: List<ChatMessage>): ChatReply {
+    private fun requestWithFallback(context: Context, memories: List<String>, messages: List<ChatMessage>): ChatReply {
         check(providers.isNotEmpty()) { "No AI provider is configured." }
         val failures = mutableListOf<String>()
         providers.forEach { provider ->
             try {
-                val response = requestWithTools(context, provider, messages)
+                val response = requestWithTools(context, provider, memories, messages)
                 return ChatReply(response.text, provider.name, response.tokenCount)
             } catch (error: Exception) {
                 failures += "${provider.name}: ${error.message ?: "request failed"}"
@@ -537,19 +696,27 @@ private object AiClient {
         error("All AI providers failed. ${failures.joinToString(" | ")}")
     }
 
-    private fun requestWithTools(context: Context, provider: AiProvider, messages: List<ChatMessage>): ProviderResponse {
+    private fun requestWithTools(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
+        if (!provider.supportsImages && messages.any { it.imageUri != null }) {
+            return ProviderResponse(
+                "I can show the attached image here, but the current OpenRouter Free Router endpoint does not support image input. Send a text description of the image and I can help from that.",
+                null,
+            )
+        }
+
         val directSearch = directSearchRequest(messages.lastOrNull { it.role == MessageRole.USER }?.text.orEmpty())
         if (directSearch != null) {
             val toolContext = WebTools.run(directSearch)
-            return request(context, provider, messages, toolContext)
+            return request(context, provider, memories, messages, toolContext)
         }
 
-        val firstResponse = request(context, provider, messages)
+        val firstResponse = request(context, provider, memories, messages)
         val requestedSearch = parseSearchRequest(firstResponse.text) ?: return firstResponse
         val toolContext = WebTools.run(requestedSearch)
         return request(
             context = context,
             provider = provider,
+            memories = memories,
             messages = messages + ChatMessage(
                 id = System.nanoTime(),
                 role = MessageRole.ASSISTANT,
@@ -559,7 +726,7 @@ private object AiClient {
         )
     }
 
-    private fun request(context: Context, provider: AiProvider, messages: List<ChatMessage>, toolContext: String? = null): ProviderResponse {
+    private fun request(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>, toolContext: String? = null): ProviderResponse {
         val requestBody = JSONObject().apply {
             put("model", provider.model)
             put("messages", JSONArray().apply {
@@ -567,6 +734,12 @@ private object AiClient {
                     put("role", "system")
                     put("content", SYSTEM_PROMPT)
                 })
+                if (memories.isNotEmpty()) {
+                    put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", "Persistent user memory. Use only when relevant and do not mention this memory block directly:\n${memories.joinToString("\n") { "- $it" }}")
+                    })
+                }
                 if (!toolContext.isNullOrBlank()) {
                     put(JSONObject().apply {
                         put("role", "system")
@@ -605,6 +778,7 @@ private object AiClient {
                 .getString("content")
                 .trim()
                 .ifBlank { error("The model returned an empty response.") }
+                .let(::cleanProviderText)
             val usage = response.optJSONObject("usage")
             val tokenCount = usage?.takeIf { it.has("total_tokens") }?.optInt("total_tokens")
             ProviderResponse(text, tokenCount)
@@ -635,6 +809,7 @@ private fun ChatMessage.toOpenAiContent(context: Context): Any {
 private fun ChatApp() {
     val context = LocalContext.current
     val store = remember { ConversationStore(context) }
+    val memoryStore = remember { MemoryStore(context) }
     val messages = remember { mutableStateListOf<ChatMessage>() }
     var recentChats by remember { mutableStateOf(store.loadAll()) }
     var currentChatId by rememberSaveable { mutableStateOf(UUID.randomUUID().toString()) }
@@ -655,6 +830,7 @@ private fun ChatApp() {
                 context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             pendingImageUri = uri.toString()
+            FirebaseEvents.log(context, "image_attached")
         }
     }
 
@@ -728,13 +904,20 @@ private fun ChatApp() {
         val originChatId = currentChatId
         if (messages.isEmpty()) currentTitle = text.ifBlank { "Image" }.replace("\n", " ").take(48)
         messages += ChatMessage(System.nanoTime(), MessageRole.USER, text, imageUri = imageUri)
+        val memoryBefore = memoryStore.load().size
+        memoryStore.learnFromUserMessage(text)
+        val memories = memoryStore.load()
+        if (memories.size > memoryBefore) FirebaseEvents.log(context, "memory_learned")
+        FirebaseEvents.log(context, "message_sent") {
+            putString("has_image", (!imageUri.isNullOrBlank()).toString())
+        }
         draft = ""
         pendingImageUri = null
         isWaiting = true
         saveCurrent()
         val requestMessages = messages.toList()
 
-        AiClient.send(context, requestMessages) { result ->
+        AiClient.send(context, memories, requestMessages) { result ->
             val reply = result.getOrNull()
             val replyMessage = ChatMessage(
                 id = System.nanoTime(),
@@ -755,6 +938,9 @@ private fun ChatApp() {
             }
             if (currentChatId == originChatId) {
                 if (reply != null) activeProvider = reply.providerName
+                FirebaseEvents.log(context, "ai_reply_received") {
+                    putString("success", (reply != null).toString())
+                }
                 messages += replyMessage
                 isWaiting = false
                 playInAppChirp()
@@ -865,14 +1051,17 @@ private fun ChatApp() {
 
 private fun playInAppChirp() {
     runCatching {
-        val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 45)
-        tone.startTone(ToneGenerator.TONE_PROP_BEEP, 55)
+        val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
+        tone.startTone(ToneGenerator.TONE_PROP_ACK, 90)
         Handler(Looper.getMainLooper()).postDelayed({
-            tone.startTone(ToneGenerator.TONE_PROP_ACK, 70)
-        }, 75)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP2, 105)
+        }, 115)
+        Handler(Looper.getMainLooper()).postDelayed({
+            tone.startTone(ToneGenerator.TONE_PROP_ACK, 80)
+        }, 250)
         Handler(Looper.getMainLooper()).postDelayed({
             tone.release()
-        }, 220)
+        }, 430)
     }
 }
 
@@ -1355,7 +1544,7 @@ private fun MessageComposer(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text("Image attached", color = Ink, fontSize = 13.sp)
+                Text("Image attached locally", color = Ink, fontSize = 13.sp)
                 Text(
                     "Remove",
                     color = Muted,
