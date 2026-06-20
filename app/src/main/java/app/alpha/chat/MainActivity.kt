@@ -6,20 +6,27 @@ import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -88,6 +95,7 @@ private val UserBubble = Color(0xFFE1EFE8)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent { AlphaTheme { ChatApp() } }
     }
 }
@@ -421,6 +429,7 @@ private fun ChatApp() {
     ) {
         Scaffold(
             containerColor = Paper,
+            contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
             topBar = {
                 TopAppBar(
                     navigationIcon = {
@@ -442,22 +451,27 @@ private fun ChatApp() {
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper),
                 )
             },
-            bottomBar = {
-                MessageComposer(draft, isWaiting, { draft = it }, ::sendMessage)
-            },
         ) { padding ->
-            if (messages.isEmpty()) {
-                EmptyChat(Modifier.padding(padding))
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(padding),
-                    state = listState,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    items(messages, key = { it.id }) { MessageBubble(it) }
-                    if (isWaiting) item { WaitingBubble() }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .consumeWindowInsets(padding),
+            ) {
+                if (messages.isEmpty()) {
+                    EmptyChat(Modifier.weight(1f))
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        state = listState,
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        items(messages, key = { it.id }) { MessageBubble(it) }
+                        if (isWaiting) item { WaitingBubble() }
+                    }
                 }
+                MessageComposer(draft, isWaiting, { draft = it }, ::sendMessage)
             }
         }
     }
@@ -486,7 +500,7 @@ private fun RecentChatsDrawer(
         if (chats.isEmpty()) {
             Text("Your conversations will appear here.", color = Muted, modifier = Modifier.padding(18.dp))
         } else {
-            LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
+            LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
                 items(chats, key = { it.id }) { chat ->
                     Row(
                         modifier = Modifier
@@ -584,7 +598,7 @@ private fun MessageComposer(value: String, isWaiting: Boolean, onValueChange: (S
             enabled = value.isNotBlank() && !isWaiting,
             modifier = Modifier.size(52.dp),
             shape = CircleShape,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            contentPadding = PaddingValues(0.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Accent),
         ) {
             Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Send")
