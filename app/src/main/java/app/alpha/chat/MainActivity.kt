@@ -1,18 +1,35 @@
 package app.alpha.chat
 
 import android.annotation.SuppressLint
+import android.Manifest
+import android.app.AlarmManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -44,6 +61,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.Button
@@ -67,7 +85,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -78,8 +95,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -92,7 +114,10 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URLEncoder
 import java.net.URL
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.Executors
 
@@ -109,7 +134,161 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ReminderScheduler.ensureNotificationChannel(this)
+        ReminderScheduler.scheduleHourly(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2001)
+        }
         setContent { AlphaTheme { ChatApp() } }
+    }
+}
+
+class ReminderReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val pendingResult = goAsync()
+        Executors.newSingleThreadExecutor().execute {
+            try {
+                ReminderScheduler.showGeneratedReminder(context)
+                ReminderScheduler.scheduleHourly(context)
+            } finally {
+                pendingResult.finish()
+            }
+        }
+    }
+}
+
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+            ReminderScheduler.ensureNotificationChannel(context)
+            ReminderScheduler.scheduleHourly(context)
+        }
+    }
+}
+
+private object ReminderScheduler {
+    private const val CHANNEL_ID = "budgie_ai_reminders"
+    private const val REMINDER_REQUEST_CODE = 4401
+    private const val NOTIFICATION_ID = 4402
+    private const val ONE_HOUR_MS = 60L * 60L * 1000L
+
+    fun ensureNotificationChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Budgie reminders",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "Hourly Budgie AI reminders"
+            }
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    fun scheduleHourly(context: Context) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        alarmManager.setInexactRepeating(
+            AlarmManager.RTC_WAKEUP,
+            System.currentTimeMillis() + ONE_HOUR_MS,
+            ONE_HOUR_MS,
+            reminderIntent(context),
+        )
+    }
+
+    fun showGeneratedReminder(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        ensureNotificationChannel(context)
+        val message = ReminderContent.generate()
+        val launchIntent = PendingIntent.getActivity(
+            context,
+            0,
+            Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.budgie_icon)
+            .setContentTitle("Budgie AI")
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setContentIntent(launchIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+
+        NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun reminderIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
+        context,
+        REMINDER_REQUEST_CODE,
+        Intent(context, ReminderReceiver::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+}
+
+private object ReminderContent {
+    fun generate(): String = runCatching {
+        if (BuildConfig.OPENROUTER_API_KEY.isBlank()) return@runCatching fallback()
+        val body = JSONObject().apply {
+            put("model", "openrouter/free")
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", "Create one fresh, concise, useful app reminder from Budgie AI. Keep it under 90 characters. No hashtags. No markdown. Vary it each time.")
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", "Write a new reminder inviting the user back to Budgie AI.")
+                })
+            })
+        }.toString()
+
+        val connection = (URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 12_000
+            readTimeout = 20_000
+            doOutput = true
+            setRequestProperty("Authorization", "Bearer ${BuildConfig.OPENROUTER_API_KEY}")
+            setRequestProperty("Content-Type", "application/json")
+        }
+        try {
+            connection.outputStream.bufferedWriter().use { it.write(body) }
+            val responseText = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()
+                ?.use { it.readText() }
+                .orEmpty()
+            JSONObject(responseText.ifBlank { "{}" })
+                .optJSONArray("choices")
+                ?.optJSONObject(0)
+                ?.optJSONObject("message")
+                ?.optString("content")
+                ?.trim()
+                ?.take(120)
+                ?.ifBlank { fallback() }
+                ?: fallback()
+        } finally {
+            connection.disconnect()
+        }
+    }.getOrDefault(fallback())
+
+    private fun fallback(): String {
+        val options = listOf(
+            "Chirp. A fresh idea is waiting in Budgie AI.",
+            "Come back to Budgie AI and make something useful.",
+            "Budgie AI is ready for your next question.",
+            "Quick flock check: want to create something new?",
+        )
+        return options[(System.currentTimeMillis() / 1000 % options.size).toInt()]
     }
 }
 
@@ -120,6 +299,7 @@ private data class ChatMessage(
     val role: MessageRole,
     val text: String,
     val tokenCount: Int? = null,
+    val imageUri: String? = null,
 )
 
 private data class Conversation(
@@ -172,6 +352,7 @@ private fun Conversation.toJson() = JSONObject().apply {
                 put("role", message.role.name)
                 put("text", message.text)
                 message.tokenCount?.let { put("tokenCount", it) }
+                message.imageUri?.let { put("imageUri", it) }
             })
         }
     })
@@ -189,6 +370,7 @@ private fun JSONObject.toConversation(): Conversation {
                         .getOrDefault(MessageRole.USER),
                     text = message.optString("text"),
                     tokenCount = if (message.has("tokenCount")) message.optInt("tokenCount") else null,
+                    imageUri = message.optString("imageUri").takeIf { it.isNotBlank() },
                 ),
             )
         }
@@ -217,10 +399,111 @@ private data class ChatReply(
 
 private data class ProviderResponse(val text: String, val tokenCount: Int?)
 
+private enum class SearchKind(val label: String) {
+    WEB("web_search"),
+    IMAGE("image_search"),
+}
+
+private data class SearchRequest(val kind: SearchKind, val query: String)
+
+private object WebTools {
+    fun run(request: SearchRequest): String = when (request.kind) {
+        SearchKind.WEB -> search("https://duckduckgo.com/html/?q=${encode(request.query)}", request)
+        SearchKind.IMAGE -> search("https://duckduckgo.com/html/?q=${encode("${request.query} images")}", request)
+    }
+
+    fun imageDataUrl(context: Context, uriText: String): String? = runCatching {
+        val uri = Uri.parse(uriText)
+        val mimeType = context.contentResolver.getType(uri)?.takeIf { it.startsWith("image/") } ?: "image/jpeg"
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
+        "data:$mimeType;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+    }.getOrNull()
+
+    private fun search(url: String, request: SearchRequest): String = runCatching {
+        val html = httpGet(url)
+        val results = Regex("""<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>""")
+            .findAll(html)
+            .mapIndexed { index, match ->
+                val title = cleanHtml(match.groupValues[2])
+                val link = cleanDuckDuckGoUrl(match.groupValues[1])
+                "${index + 1}. $title\n$link"
+            }
+            .take(5)
+            .toList()
+
+        buildString {
+            appendLine("Tool results for ${request.kind.label}: ${request.query}")
+            if (results.isEmpty()) {
+                append("No results found.")
+            } else {
+                results.forEach { appendLine(it).appendLine() }
+            }
+        }
+    }.getOrElse { error ->
+        "Tool results for ${request.kind.label}: ${request.query}\nSearch failed: ${error.message ?: "unknown error"}"
+    }
+
+    private fun httpGet(url: String): String {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 12_000
+            readTimeout = 12_000
+            setRequestProperty("User-Agent", "Mozilla/5.0 BudgieAI/0.0.8")
+        }
+        return try {
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+
+    private fun cleanDuckDuckGoUrl(value: String): String {
+        val decoded = value
+            .replace("&amp;", "&")
+            .let { runCatching { URI(it).rawQuery }.getOrNull() ?: it }
+        val uddg = decoded.split("&")
+            .firstOrNull { it.startsWith("uddg=") }
+            ?.removePrefix("uddg=")
+        return runCatching {
+            if (uddg != null) java.net.URLDecoder.decode(uddg, StandardCharsets.UTF_8.name()) else value.replace("&amp;", "&")
+        }.getOrDefault(value.replace("&amp;", "&"))
+    }
+
+    private fun cleanHtml(value: String): String = value
+        .replace(Regex("<.*?>"), "")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .trim()
+}
+
+private fun parseSearchRequest(text: String): SearchRequest? {
+    val match = Regex("""\[\[(web_search|image_search):\s*(.+?)]]""", RegexOption.IGNORE_CASE).find(text) ?: return null
+    val kind = if (match.groupValues[1].equals("image_search", ignoreCase = true)) SearchKind.IMAGE else SearchKind.WEB
+    return SearchRequest(kind, match.groupValues[2].trim())
+}
+
+private fun directSearchRequest(text: String): SearchRequest? {
+    val trimmed = text.trim()
+    val lower = trimmed.lowercase()
+    return when {
+        lower.startsWith("web search ") -> SearchRequest(SearchKind.WEB, trimmed.drop(11).trim())
+        lower.startsWith("search web ") -> SearchRequest(SearchKind.WEB, trimmed.drop(11).trim())
+        lower.startsWith("image search ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(13).trim())
+        lower.startsWith("search images ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(14).trim())
+        else -> null
+    }?.takeIf { it.query.isNotBlank() }
+}
+
 private object AiClient {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a useful assistant. Keep the personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock when natural. Do not roleplay as a human, do not overdo bird sounds, and keep answers practical, accurate, and concise. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
+    private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a useful assistant. Keep the personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock when natural. Do not roleplay as a human, do not overdo bird sounds, and keep answers practical, accurate, and concise. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math. You can use in-app tools. If web results are needed, reply with exactly [[web_search: query]]. If image results are needed, reply with exactly [[image_search: query]]. After tool results are provided, answer normally and cite result links when relevant."
 
     private val providers: List<AiProvider>
         get() = listOf(
@@ -232,19 +515,20 @@ private object AiClient {
             ),
         ).filter { it.name.isNotBlank() && it.endpoint.isNotBlank() && it.model.isNotBlank() && it.apiKey.isNotBlank() }
 
-    fun send(messages: List<ChatMessage>, callback: (Result<ChatReply>) -> Unit) {
+    fun send(context: Context, messages: List<ChatMessage>, callback: (Result<ChatReply>) -> Unit) {
+        val appContext = context.applicationContext
         executor.execute {
-            val result = runCatching { requestWithFallback(messages) }
+            val result = runCatching { requestWithFallback(appContext, messages) }
             mainHandler.post { callback(result) }
         }
     }
 
-    private fun requestWithFallback(messages: List<ChatMessage>): ChatReply {
+    private fun requestWithFallback(context: Context, messages: List<ChatMessage>): ChatReply {
         check(providers.isNotEmpty()) { "No AI provider is configured." }
         val failures = mutableListOf<String>()
         providers.forEach { provider ->
             try {
-                val response = request(provider, messages)
+                val response = requestWithTools(context, provider, messages)
                 return ChatReply(response.text, provider.name, response.tokenCount)
             } catch (error: Exception) {
                 failures += "${provider.name}: ${error.message ?: "request failed"}"
@@ -253,7 +537,29 @@ private object AiClient {
         error("All AI providers failed. ${failures.joinToString(" | ")}")
     }
 
-    private fun request(provider: AiProvider, messages: List<ChatMessage>): ProviderResponse {
+    private fun requestWithTools(context: Context, provider: AiProvider, messages: List<ChatMessage>): ProviderResponse {
+        val directSearch = directSearchRequest(messages.lastOrNull { it.role == MessageRole.USER }?.text.orEmpty())
+        if (directSearch != null) {
+            val toolContext = WebTools.run(directSearch)
+            return request(context, provider, messages, toolContext)
+        }
+
+        val firstResponse = request(context, provider, messages)
+        val requestedSearch = parseSearchRequest(firstResponse.text) ?: return firstResponse
+        val toolContext = WebTools.run(requestedSearch)
+        return request(
+            context = context,
+            provider = provider,
+            messages = messages + ChatMessage(
+                id = System.nanoTime(),
+                role = MessageRole.ASSISTANT,
+                text = "Tool request: ${requestedSearch.kind.label} ${requestedSearch.query}",
+            ),
+            toolContext = toolContext,
+        )
+    }
+
+    private fun request(context: Context, provider: AiProvider, messages: List<ChatMessage>, toolContext: String? = null): ProviderResponse {
         val requestBody = JSONObject().apply {
             put("model", provider.model)
             put("messages", JSONArray().apply {
@@ -261,10 +567,16 @@ private object AiClient {
                     put("role", "system")
                     put("content", SYSTEM_PROMPT)
                 })
+                if (!toolContext.isNullOrBlank()) {
+                    put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", toolContext)
+                    })
+                }
                 messages.forEach { message ->
                     put(JSONObject().apply {
                         put("role", if (message.role == MessageRole.USER) "user" else "assistant")
-                        put("content", message.text)
+                        put("content", message.toOpenAiContent(context))
                     })
                 }
             })
@@ -302,6 +614,22 @@ private object AiClient {
     }
 }
 
+private fun ChatMessage.toOpenAiContent(context: Context): Any {
+    val uri = imageUri
+    if (uri.isNullOrBlank() || role != MessageRole.USER) return text
+    val imageDataUrl = WebTools.imageDataUrl(context, uri) ?: return "$text\n[Image attached but unavailable to send.]"
+    return JSONArray().apply {
+        put(JSONObject().apply {
+            put("type", "text")
+            put("text", text.ifBlank { "Describe this image." })
+        })
+        put(JSONObject().apply {
+            put("type", "image_url")
+            put("image_url", JSONObject().apply { put("url", imageDataUrl) })
+        })
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatApp() {
@@ -312,6 +640,7 @@ private fun ChatApp() {
     var currentChatId by rememberSaveable { mutableStateOf(UUID.randomUUID().toString()) }
     var currentTitle by rememberSaveable { mutableStateOf("New chat") }
     var draft by rememberSaveable { mutableStateOf("") }
+    var pendingImageUri by rememberSaveable { mutableStateOf<String?>(null) }
     var isWaiting by rememberSaveable { mutableStateOf(false) }
     var activeProvider by rememberSaveable { mutableStateOf(PrimaryProviderName) }
     var typingChatId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -320,6 +649,14 @@ private fun ChatApp() {
     val listState = rememberLazyListState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            pendingImageUri = uri.toString()
+        }
+    }
 
     fun currentConversation(): Conversation = Conversation(
         id = currentChatId,
@@ -342,6 +679,7 @@ private fun ChatApp() {
         currentTitle = "New chat"
         messages.clear()
         draft = ""
+        pendingImageUri = null
         isWaiting = false
         typingChatId = null
         typingMessageId = null
@@ -358,6 +696,7 @@ private fun ChatApp() {
         messages.clear()
         messages.addAll(conversation.messages)
         draft = ""
+        pendingImageUri = null
         isWaiting = false
         typingChatId = null
         typingMessageId = null
@@ -373,6 +712,7 @@ private fun ChatApp() {
             currentTitle = "New chat"
             messages.clear()
             draft = ""
+            pendingImageUri = null
             isWaiting = false
             typingChatId = null
             typingMessageId = null
@@ -383,16 +723,18 @@ private fun ChatApp() {
 
     fun sendMessage() {
         val text = draft.trim()
-        if (text.isEmpty() || isWaiting) return
+        val imageUri = pendingImageUri
+        if ((text.isEmpty() && imageUri.isNullOrBlank()) || isWaiting) return
         val originChatId = currentChatId
-        if (messages.isEmpty()) currentTitle = text.replace("\n", " ").take(48)
-        messages += ChatMessage(System.nanoTime(), MessageRole.USER, text)
+        if (messages.isEmpty()) currentTitle = text.ifBlank { "Image" }.replace("\n", " ").take(48)
+        messages += ChatMessage(System.nanoTime(), MessageRole.USER, text, imageUri = imageUri)
         draft = ""
+        pendingImageUri = null
         isWaiting = true
         saveCurrent()
         val requestMessages = messages.toList()
 
-        AiClient.send(requestMessages) { result ->
+        AiClient.send(context, requestMessages) { result ->
             val reply = result.getOrNull()
             val replyMessage = ChatMessage(
                 id = System.nanoTime(),
@@ -433,10 +775,6 @@ private fun ChatApp() {
                 }
             }
         }
-    }
-
-    LaunchedEffect(messages.size, isWaiting, typingText.length) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
     }
 
     ModalNavigationDrawer(
@@ -511,7 +849,15 @@ private fun ChatApp() {
                         if (isWaiting) item { WaitingBubble() }
                     }
                 }
-                MessageComposer(draft, isWaiting, { draft = it }, ::sendMessage)
+                MessageComposer(
+                    value = draft,
+                    isWaiting = isWaiting,
+                    pendingImageUri = pendingImageUri,
+                    onValueChange = { draft = it },
+                    onAttachImage = { imagePicker.launch(arrayOf("image/*")) },
+                    onClearImage = { pendingImageUri = null },
+                    onSend = ::sendMessage,
+                )
             }
         }
     }
@@ -615,7 +961,11 @@ private fun MessageBubble(message: ChatMessage, displayText: String = message.te
             elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                MessageText(displayText)
+                message.imageUri?.let {
+                    ChatImage(it)
+                    if (displayText.isNotBlank()) Spacer(Modifier.height(8.dp))
+                }
+                if (displayText.isNotBlank() || message.imageUri.isNullOrBlank()) MessageText(displayText)
                 if (!isUser) {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -630,8 +980,120 @@ private fun MessageBubble(message: ChatMessage, displayText: String = message.te
 }
 
 @Composable
+private fun ChatImage(uriText: String) {
+    val context = LocalContext.current
+    val bitmap = remember(uriText) {
+        runCatching {
+            context.contentResolver.openInputStream(Uri.parse(uriText))?.use { stream ->
+                BitmapFactory.decodeStream(stream)?.asImageBitmap()
+            }
+        }.getOrNull()
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = "Uploaded image",
+            modifier = Modifier.fillMaxWidth().height(180.dp),
+            contentScale = ContentScale.Crop,
+        )
+    } else {
+        Text("Image unavailable", color = Muted, fontSize = 13.sp)
+    }
+}
+
+@Composable
 private fun MessageText(text: String) {
-    LatexMessageWebView(text)
+    when {
+        text.isEmpty() -> Text("|", color = Muted, fontSize = 15.sp, lineHeight = 22.sp)
+        containsLatex(text) -> LatexMessageWebView(text)
+        else -> NativeMarkdownText(text)
+    }
+}
+
+@Composable
+private fun NativeMarkdownText(text: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        text.lines().forEach { rawLine ->
+            val line = rawLine.trimEnd()
+            when {
+                line.isBlank() -> Spacer(Modifier.height(4.dp))
+                line.trim() == "---" -> HorizontalDivider(color = Accent)
+                line.startsWith("### ") -> Text(
+                    text = markdownAnnotatedString(line.removePrefix("### ").trim()),
+                    color = Ink,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 21.sp,
+                )
+                line.startsWith("## ") -> Text(
+                    text = markdownAnnotatedString(line.removePrefix("## ").trim()),
+                    color = Ink,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 21.sp,
+                )
+                line.startsWith("# ") -> Text(
+                    text = markdownAnnotatedString(line.removePrefix("# ").trim()),
+                    color = Ink,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 21.sp,
+                )
+                line.trimStart().startsWith("- ") -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("-", color = Muted, fontSize = 15.sp, lineHeight = 22.sp)
+                    Text(
+                        text = markdownAnnotatedString(line.trimStart().removePrefix("- ").trim()),
+                        color = Ink,
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                else -> Text(
+                    text = markdownAnnotatedString(line),
+                    color = Ink,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                )
+            }
+        }
+    }
+}
+
+private fun markdownAnnotatedString(text: String) = buildAnnotatedString {
+    var index = 0
+    while (index < text.length) {
+        when {
+            text.startsWith("**", index) -> {
+                val end = text.indexOf("**", startIndex = index + 2)
+                if (end > index) {
+                    pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
+                    append(text.substring(index + 2, end))
+                    pop()
+                    index = end + 2
+                } else {
+                    append(text[index])
+                    index++
+                }
+            }
+            text[index] == '*' -> {
+                val end = text.indexOf('*', startIndex = index + 1)
+                if (end > index) {
+                    pushStyle(SpanStyle(fontStyle = FontStyle.Italic))
+                    append(text.substring(index + 1, end))
+                    pop()
+                    index = end + 1
+                } else {
+                    append(text[index])
+                    index++
+                }
+            }
+            else -> {
+                append(text[index])
+                index++
+            }
+        }
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -679,6 +1141,12 @@ private fun LatexMessageWebView(text: String) {
         },
     )
 }
+
+private fun containsLatex(text: String): Boolean =
+    text.contains("\\(") ||
+        text.contains("\\[") ||
+        text.contains("$$") ||
+        Regex("""(?<!\\)\$[^$\n]+(?<!\\)\$""").containsMatchIn(text)
 
 private fun latexHtmlDocument(text: String): String {
     val body = markdownToHtml(text)
@@ -868,45 +1336,79 @@ private fun WaitingBubble() {
 }
 
 @Composable
-private fun MessageComposer(value: String, isWaiting: Boolean, onValueChange: (String) -> Unit, onSend: () -> Unit) {
-    Row(
+private fun MessageComposer(
+    value: String,
+    isWaiting: Boolean,
+    pendingImageUri: String?,
+    onValueChange: (String) -> Unit,
+    onAttachImage: () -> Unit,
+    onClearImage: () -> Unit,
+    onSend: () -> Unit,
+) {
+    Column(
         modifier = Modifier.fillMaxWidth().background(Paper).navigationBarsPadding().imePadding().padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        OutlinedTextField(
-            value,
-            onValueChange,
-            Modifier.weight(1f),
-            placeholder = { Text("Message") },
-            maxLines = 5,
-            shape = RoundedCornerShape(6.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Ink,
-                unfocusedTextColor = Ink,
-                focusedBorderColor = Accent,
-                unfocusedBorderColor = Accent,
-                focusedContainerColor = Paper,
-                unfocusedContainerColor = Paper,
-                cursorColor = Ink,
-                focusedPlaceholderColor = Muted,
-                unfocusedPlaceholderColor = Muted,
-            ),
-        )
-        Button(
-            onClick = onSend,
-            enabled = value.isNotBlank() && !isWaiting,
-            modifier = Modifier.size(52.dp),
-            shape = RoundedCornerShape(6.dp),
-            contentPadding = PaddingValues(0.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Ink,
-                contentColor = Paper,
-                disabledContainerColor = Surface,
-                disabledContentColor = Muted,
-            ),
+        if (pendingImageUri != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Image attached", color = Ink, fontSize = 13.sp)
+                Text(
+                    "Remove",
+                    color = Muted,
+                    fontSize = 13.sp,
+                    modifier = Modifier.clickable { onClearImage() },
+                )
+            }
+        }
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Send")
+            IconButton(
+                onClick = onAttachImage,
+                enabled = !isWaiting,
+                modifier = Modifier.size(52.dp).background(Surface, RoundedCornerShape(6.dp)),
+            ) {
+                Icon(Icons.Rounded.AttachFile, contentDescription = "Attach image", tint = Muted)
+            }
+            OutlinedTextField(
+                value,
+                onValueChange,
+                Modifier.weight(1f),
+                placeholder = { Text("Message") },
+                maxLines = 5,
+                shape = RoundedCornerShape(6.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Ink,
+                    unfocusedTextColor = Ink,
+                    focusedBorderColor = Accent,
+                    unfocusedBorderColor = Accent,
+                    focusedContainerColor = Paper,
+                    unfocusedContainerColor = Paper,
+                    cursorColor = Ink,
+                    focusedPlaceholderColor = Muted,
+                    unfocusedPlaceholderColor = Muted,
+                ),
+            )
+            Button(
+                onClick = onSend,
+                enabled = (value.isNotBlank() || pendingImageUri != null) && !isWaiting,
+                modifier = Modifier.size(52.dp),
+                shape = RoundedCornerShape(6.dp),
+                contentPadding = PaddingValues(0.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Ink,
+                    contentColor = Paper,
+                    disabledContainerColor = Surface,
+                    disabledContentColor = Muted,
+                ),
+            ) {
+                Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Send")
+            }
         }
     }
 }
