@@ -1,12 +1,17 @@
 package app.alpha.chat
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -71,9 +76,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -86,11 +94,15 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 private val Ink = Color(0xFF161719)
-private val Paper = Color(0xFFF7F7F5)
+private val Paper = Color(0xFFF6FAF3)
 private val Surface = Color(0xFFFFFFFF)
 private val Muted = Color(0xFF686A70)
-private val Accent = Color(0xFF315C4A)
-private val UserBubble = Color(0xFFE1EFE8)
+private val Accent = Color(0xFF247455)
+private val Sky = Color(0xFF4CA9D8)
+private val Sun = Color(0xFFF2C94C)
+private val UserBubble = Color(0xFFDDF2EA)
+private val AssistantBubble = Color(0xFFFFFAE4)
+private const val PrimaryProviderName = "Hermes 3 405B"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -184,7 +196,7 @@ private fun JSONObject.toConversation(): Conversation {
         id = optString("id", UUID.randomUUID().toString()),
         title = optString("title", "New chat"),
         updatedAt = optLong("updatedAt", 0L),
-        providerName = optString("providerName", "Gemma 4 31B"),
+        providerName = optString("providerName", PrimaryProviderName),
         messages = messages,
     )
 }
@@ -207,15 +219,10 @@ private data class ProviderResponse(val text: String, val tokenCount: Int?)
 private object AiClient {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private const val SYSTEM_PROMPT = "You are Budgie AI. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
 
     private val providers: List<AiProvider>
         get() = listOf(
-            AiProvider(
-                "Gemma 4 31B",
-                "https://openrouter.ai/api/v1/chat/completions",
-                BuildConfig.OPENROUTER_MODEL,
-                BuildConfig.OPENROUTER_API_KEY,
-            ),
             AiProvider(
                 "Hermes 3 405B",
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -228,9 +235,6 @@ private object AiClient {
                 "openrouter/free",
                 BuildConfig.OPENROUTER_API_KEY,
             ),
-            AiProvider(BuildConfig.PROVIDER_2_NAME, BuildConfig.PROVIDER_2_ENDPOINT, BuildConfig.PROVIDER_2_MODEL, BuildConfig.PROVIDER_2_API_KEY),
-            AiProvider(BuildConfig.PROVIDER_3_NAME, BuildConfig.PROVIDER_3_ENDPOINT, BuildConfig.PROVIDER_3_MODEL, BuildConfig.PROVIDER_3_API_KEY),
-            AiProvider(BuildConfig.PROVIDER_4_NAME, BuildConfig.PROVIDER_4_ENDPOINT, BuildConfig.PROVIDER_4_MODEL, BuildConfig.PROVIDER_4_API_KEY),
         ).filter { it.name.isNotBlank() && it.endpoint.isNotBlank() && it.model.isNotBlank() && it.apiKey.isNotBlank() }
 
     fun send(messages: List<ChatMessage>, callback: (Result<ChatReply>) -> Unit) {
@@ -258,6 +262,10 @@ private object AiClient {
         val requestBody = JSONObject().apply {
             put("model", provider.model)
             put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", SYSTEM_PROMPT)
+                })
                 messages.forEach { message ->
                     put(JSONObject().apply {
                         put("role", if (message.role == MessageRole.USER) "user" else "assistant")
@@ -310,7 +318,7 @@ private fun ChatApp() {
     var currentTitle by rememberSaveable { mutableStateOf("New chat") }
     var draft by rememberSaveable { mutableStateOf("") }
     var isWaiting by rememberSaveable { mutableStateOf(false) }
-    var activeProvider by rememberSaveable { mutableStateOf("Gemma 4 31B") }
+    var activeProvider by rememberSaveable { mutableStateOf(PrimaryProviderName) }
     val listState = rememberLazyListState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -337,7 +345,7 @@ private fun ChatApp() {
         messages.clear()
         draft = ""
         isWaiting = false
-        activeProvider = "Gemma 4 31B"
+        activeProvider = PrimaryProviderName
         scope.launch { drawerState.close() }
     }
 
@@ -362,7 +370,7 @@ private fun ChatApp() {
             messages.clear()
             draft = ""
             isWaiting = false
-            activeProvider = "Gemma 4 31B"
+            activeProvider = PrimaryProviderName
         }
     }
 
@@ -528,11 +536,21 @@ private fun RecentChatsDrawer(
 private fun EmptyChat(modifier: Modifier = Modifier) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.size(48.dp).background(Accent, CircleShape), contentAlignment = Alignment.Center) {
-                Text("A", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Box(
+                Modifier
+                    .size(142.dp)
+                    .background(Color.White, CircleShape)
+                    .padding(14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.budgie_parakeets),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
             Spacer(Modifier.height(18.dp))
-            Text("Start a conversation", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            Text("Budgie AI", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             Text(
                 "Ask a question or describe what you need help with.",
@@ -547,15 +565,23 @@ private fun EmptyChat(modifier: Modifier = Modifier) {
 @Composable
 private fun MessageBubble(message: ChatMessage) {
     val isUser = message.role == MessageRole.USER
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Top,
+    ) {
+        if (!isUser) {
+            BudgieAvatar()
+            Spacer(Modifier.size(8.dp))
+        }
         Card(
-            modifier = Modifier.fillMaxWidth(0.86f),
+            modifier = Modifier.fillMaxWidth(if (isUser) 0.86f else 0.78f),
             shape = RoundedCornerShape(20.dp, 20.dp, if (isUser) 20.dp else 6.dp, if (isUser) 6.dp else 20.dp),
-            colors = CardDefaults.cardColors(containerColor = if (isUser) UserBubble else Surface),
+            colors = CardDefaults.cardColors(containerColor = if (isUser) UserBubble else AssistantBubble),
             elevation = CardDefaults.cardElevation(defaultElevation = if (isUser) 0.dp else 1.dp),
         ) {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 13.dp)) {
-                Text(message.text, color = Ink, lineHeight = 22.sp)
+                MessageText(message.text)
                 if (!isUser) {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -569,11 +595,183 @@ private fun MessageBubble(message: ChatMessage) {
     }
 }
 
+private data class LatexBlock(val text: String, val isFormula: Boolean)
+
+@Composable
+private fun MessageText(text: String) {
+    LatexMessageWebView(text)
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun LatexMessageWebView(text: String) {
+    val density = LocalDensity.current
+    var contentHeight by remember(text) { mutableStateOf(1.dp) }
+    val html = remember(text) { latexHtmlDocument(text) }
+
+    AndroidView(
+        modifier = Modifier.fillMaxWidth().height(contentHeight),
+        factory = { context ->
+            WebView(context).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                isVerticalScrollBarEnabled = false
+                isHorizontalScrollBarEnabled = false
+                overScrollMode = WebView.OVER_SCROLL_NEVER
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = false
+                settings.builtInZoomControls = false
+                settings.displayZoomControls = false
+                addJavascriptInterface(
+                    object {
+                        @JavascriptInterface
+                        fun setHeight(heightPx: Float) {
+                            Handler(Looper.getMainLooper()).post {
+                                contentHeight = with(density) { heightPx.toDp() + 2.dp }
+                            }
+                        }
+                    },
+                    "BudgieLayout",
+                )
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        view.evaluateJavascript("window.budgieTypeset && window.budgieTypeset();", null)
+                    }
+                }
+                loadDataWithBaseURL("https://appassets.androidplatform.net/", html, "text/html", "UTF-8", null)
+            }
+        },
+        update = { view ->
+            if (view.tag != html) {
+                view.tag = html
+                view.loadDataWithBaseURL("https://appassets.androidplatform.net/", html, "text/html", "UTF-8", null)
+            }
+        },
+    )
+}
+
+private fun latexHtmlDocument(text: String): String {
+    val body = escapeHtml(text)
+    return """
+        <!doctype html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+            <script>
+                window.MathJax = {
+                    tex: {
+                        inlineMath: [['\\(', '\\)'], ['${'$'}', '${'$'}']],
+                        displayMath: [['\\[', '\\]'], ['${'$'}${'$'}', '${'$'}${'$'}']],
+                        processEscapes: true,
+                        packages: {'[+]': ['ams', 'mathtools', 'bbox', 'color', 'textmacros']}
+                    },
+                    loader: {load: ['[tex]/ams', '[tex]/mathtools', '[tex]/bbox', '[tex]/color', '[tex]/textmacros']},
+                    options: {
+                        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+                    },
+                    startup: {typeset: false}
+                };
+            </script>
+            <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+            <style>
+                html, body {
+                    margin: 0;
+                    padding: 0;
+                    background: transparent;
+                    color: #161719;
+                    font-family: sans-serif;
+                    font-size: 16px;
+                    line-height: 1.45;
+                    overflow: hidden;
+                }
+                #content {
+                    white-space: pre-wrap;
+                    overflow-wrap: anywhere;
+                    word-break: normal;
+                    padding: 0;
+                }
+                mjx-container[jax="CHTML"][display="true"] {
+                    overflow-x: auto;
+                    overflow-y: hidden;
+                    max-width: 100%;
+                    margin: 0.65em 0;
+                    padding: 0.7em 0.8em;
+                    border-radius: 12px;
+                    background: #EAF6F7;
+                    color: #247455;
+                }
+                mjx-container[jax="CHTML"]:not([display="true"]) {
+                    color: #247455;
+                }
+            </style>
+        </head>
+        <body>
+            <div id="content">$body</div>
+            <script>
+                function budgieResize() {
+                    const height = Math.max(
+                        document.body.scrollHeight,
+                        document.documentElement.scrollHeight,
+                        document.getElementById('content').scrollHeight
+                    );
+                    BudgieLayout.setHeight(height);
+                }
+                window.budgieTypeset = function() {
+                    if (window.MathJax && MathJax.typesetPromise) {
+                        MathJax.typesetPromise([document.getElementById('content')])
+                            .then(budgieResize)
+                            .catch(budgieResize);
+                    } else {
+                        budgieResize();
+                        setTimeout(window.budgieTypeset, 100);
+                    }
+                };
+                window.addEventListener('load', window.budgieTypeset);
+                window.addEventListener('resize', budgieResize);
+                setTimeout(window.budgieTypeset, 300);
+                setTimeout(budgieResize, 1200);
+            </script>
+        </body>
+        </html>
+    """.trimIndent()
+}
+
+private fun escapeHtml(value: String): String = buildString {
+    value.forEach { char ->
+        when (char) {
+            '&' -> append("&amp;")
+            '<' -> append("&lt;")
+            '>' -> append("&gt;")
+            '"' -> append("&quot;")
+            '\'' -> append("&#39;")
+            else -> append(char)
+        }
+    }
+}
+
+@Composable
+private fun BudgieAvatar() {
+    Box(
+        Modifier
+            .size(36.dp)
+            .background(Color.White, CircleShape)
+            .padding(4.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.budgie_parakeets),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
 @Composable
 private fun WaitingBubble() {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Surface)) {
-            CircularProgressIndicator(Modifier.padding(14.dp).size(18.dp), color = Accent, strokeWidth = 2.dp)
+        BudgieAvatar()
+        Spacer(Modifier.size(8.dp))
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = AssistantBubble)) {
+            CircularProgressIndicator(Modifier.padding(14.dp).size(18.dp), color = Sky, strokeWidth = 2.dp)
         }
     }
 }
@@ -612,6 +810,8 @@ private fun AlphaTheme(content: @Composable () -> Unit) {
         colorScheme = androidx.compose.material3.lightColorScheme(
             primary = Accent,
             onPrimary = Color.White,
+            secondary = Sky,
+            tertiary = Sun,
             background = Paper,
             onBackground = Ink,
             surface = Surface,
