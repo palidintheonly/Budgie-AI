@@ -2,6 +2,8 @@ package app.alpha.chat
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -11,6 +13,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,7 +40,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -58,6 +60,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -76,7 +79,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -85,6 +87,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -93,16 +96,14 @@ import java.net.URL
 import java.util.UUID
 import java.util.concurrent.Executors
 
-private val Ink = Color(0xFF161719)
-private val Paper = Color(0xFFF6FAF3)
-private val Surface = Color(0xFFFFFFFF)
-private val Muted = Color(0xFF686A70)
-private val Accent = Color(0xFF247455)
-private val Sky = Color(0xFF4CA9D8)
-private val Sun = Color(0xFFF2C94C)
-private val UserBubble = Color(0xFFDDF2EA)
-private val AssistantBubble = Color(0xFFFFFAE4)
-private const val PrimaryProviderName = "Hermes 3 405B"
+private val Ink = Color(0xFFF8FAFC)
+private val Paper = Color(0xFF09090B)
+private val Surface = Color(0xFF18181B)
+private val Muted = Color(0xFFA1A1AA)
+private val Accent = Color(0xFF3F3F46)
+private val UserBubble = Color(0xFF27272A)
+private val AssistantBubble = Color(0xFF111113)
+private const val PrimaryProviderName = "OpenRouter Free Router"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -219,16 +220,10 @@ private data class ProviderResponse(val text: String, val tokenCount: Int?)
 private object AiClient {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private const val SYSTEM_PROMPT = "You are Budgie AI. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
+    private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a useful assistant. Keep the personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock when natural. Do not roleplay as a human, do not overdo bird sounds, and keep answers practical, accurate, and concise. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
 
     private val providers: List<AiProvider>
         get() = listOf(
-            AiProvider(
-                "Hermes 3 405B",
-                "https://openrouter.ai/api/v1/chat/completions",
-                "nousresearch/hermes-3-llama-3.1-405b:free",
-                BuildConfig.OPENROUTER_API_KEY,
-            ),
             AiProvider(
                 "OpenRouter Free Router",
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -319,6 +314,9 @@ private fun ChatApp() {
     var draft by rememberSaveable { mutableStateOf("") }
     var isWaiting by rememberSaveable { mutableStateOf(false) }
     var activeProvider by rememberSaveable { mutableStateOf(PrimaryProviderName) }
+    var typingChatId by rememberSaveable { mutableStateOf<String?>(null) }
+    var typingMessageId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var typingText by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -345,6 +343,9 @@ private fun ChatApp() {
         messages.clear()
         draft = ""
         isWaiting = false
+        typingChatId = null
+        typingMessageId = null
+        typingText = ""
         activeProvider = PrimaryProviderName
         scope.launch { drawerState.close() }
     }
@@ -358,6 +359,9 @@ private fun ChatApp() {
         messages.addAll(conversation.messages)
         draft = ""
         isWaiting = false
+        typingChatId = null
+        typingMessageId = null
+        typingText = ""
         scope.launch { drawerState.close() }
     }
 
@@ -370,6 +374,9 @@ private fun ChatApp() {
             messages.clear()
             draft = ""
             isWaiting = false
+            typingChatId = null
+            typingMessageId = null
+            typingText = ""
             activeProvider = PrimaryProviderName
         }
     }
@@ -408,11 +415,27 @@ private fun ChatApp() {
                 if (reply != null) activeProvider = reply.providerName
                 messages += replyMessage
                 isWaiting = false
+                playInAppChirp()
+                typingChatId = originChatId
+                typingMessageId = replyMessage.id
+                typingText = ""
+                scope.launch {
+                    replyMessage.text.forEachIndexed { index, char ->
+                        if (typingChatId != originChatId || typingMessageId != replyMessage.id) return@launch
+                        typingText = replyMessage.text.take(index + 1)
+                        delay(if (char == '\n') 28L else 12L)
+                    }
+                    if (typingChatId == originChatId && typingMessageId == replyMessage.id) {
+                        typingChatId = null
+                        typingMessageId = null
+                        typingText = ""
+                    }
+                }
             }
         }
     }
 
-    LaunchedEffect(messages.size, isWaiting) {
+    LaunchedEffect(messages.size, isWaiting, typingText.length) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
     }
 
@@ -447,7 +470,7 @@ private fun ChatApp() {
                     },
                     title = {
                         Column {
-                            Text(currentTitle, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(currentTitle, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text("Using $activeProvider", color = Muted, fontSize = 12.sp)
                         }
                     },
@@ -456,7 +479,11 @@ private fun ChatApp() {
                             Icon(Icons.Rounded.Add, contentDescription = "New chat")
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper),
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Paper,
+                        navigationIconContentColor = Ink,
+                        actionIconContentColor = Ink,
+                    ),
                 )
             },
         ) { padding ->
@@ -472,16 +499,34 @@ private fun ChatApp() {
                     LazyColumn(
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                         state = listState,
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        items(messages, key = { it.id }) { MessageBubble(it) }
+                        items(messages, key = { it.id }) { message ->
+                            MessageBubble(
+                                message = message,
+                                displayText = if (message.id == typingMessageId) typingText else message.text,
+                            )
+                        }
                         if (isWaiting) item { WaitingBubble() }
                     }
                 }
                 MessageComposer(draft, isWaiting, { draft = it }, ::sendMessage)
             }
         }
+    }
+}
+
+private fun playInAppChirp() {
+    runCatching {
+        val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 45)
+        tone.startTone(ToneGenerator.TONE_PROP_BEEP, 55)
+        Handler(Looper.getMainLooper()).postDelayed({
+            tone.startTone(ToneGenerator.TONE_PROP_ACK, 70)
+        }, 75)
+        Handler(Looper.getMainLooper()).postDelayed({
+            tone.release()
+        }, 220)
     }
 }
 
@@ -504,7 +549,7 @@ private fun RecentChatsDrawer(
                 Icon(Icons.Rounded.Add, contentDescription = "New chat")
             }
         }
-        HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Color(0xFFE3E3DF))
+        HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Accent)
         if (chats.isEmpty()) {
             Text("Your conversations will appear here.", color = Muted, modifier = Modifier.padding(18.dp))
         } else {
@@ -513,7 +558,7 @@ private fun RecentChatsDrawer(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(if (chat.id == currentChatId) UserBubble else Color.Transparent)
+                            .background(if (chat.id == currentChatId) Surface else Color.Transparent)
                             .clickable { onOpenChat(chat) }
                             .padding(start = 18.dp, top = 12.dp, bottom = 12.dp, end = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -536,20 +581,8 @@ private fun RecentChatsDrawer(
 private fun EmptyChat(modifier: Modifier = Modifier) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                Modifier
-                    .size(142.dp)
-                    .background(Color.White, CircleShape)
-                    .padding(14.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Image(
-                    painter = painterResource(R.drawable.budgie_parakeets),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            Spacer(Modifier.height(18.dp))
+            BudgieAvatar(Modifier.size(54.dp))
+            Spacer(Modifier.height(14.dp))
             Text("Budgie AI", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             Text(
@@ -563,7 +596,7 @@ private fun EmptyChat(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage) {
+private fun MessageBubble(message: ChatMessage, displayText: String = message.text) {
     val isUser = message.role == MessageRole.USER
     Row(
         Modifier.fillMaxWidth(),
@@ -575,13 +608,14 @@ private fun MessageBubble(message: ChatMessage) {
             Spacer(Modifier.size(8.dp))
         }
         Card(
-            modifier = Modifier.fillMaxWidth(if (isUser) 0.86f else 0.78f),
-            shape = RoundedCornerShape(20.dp, 20.dp, if (isUser) 20.dp else 6.dp, if (isUser) 6.dp else 20.dp),
+            modifier = Modifier.fillMaxWidth(if (isUser) 0.90f else 0.86f),
+            shape = RoundedCornerShape(6.dp),
             colors = CardDefaults.cardColors(containerColor = if (isUser) UserBubble else AssistantBubble),
-            elevation = CardDefaults.cardElevation(defaultElevation = if (isUser) 0.dp else 1.dp),
+            border = BorderStroke(1.dp, Accent),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         ) {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 13.dp)) {
-                MessageText(message.text)
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                MessageText(displayText)
                 if (!isUser) {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -595,8 +629,6 @@ private fun MessageBubble(message: ChatMessage) {
     }
 }
 
-private data class LatexBlock(val text: String, val isFormula: Boolean)
-
 @Composable
 private fun MessageText(text: String) {
     LatexMessageWebView(text)
@@ -605,8 +637,7 @@ private fun MessageText(text: String) {
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun LatexMessageWebView(text: String) {
-    val density = LocalDensity.current
-    var contentHeight by remember(text) { mutableStateOf(1.dp) }
+    var contentHeight by remember(text) { mutableStateOf(24.dp) }
     val html = remember(text) { latexHtmlDocument(text) }
 
     AndroidView(
@@ -626,7 +657,7 @@ private fun LatexMessageWebView(text: String) {
                         @JavascriptInterface
                         fun setHeight(heightPx: Float) {
                             Handler(Looper.getMainLooper()).post {
-                                contentHeight = with(density) { heightPx.toDp() + 2.dp }
+                                contentHeight = heightPx.dp + 10.dp
                             }
                         }
                     },
@@ -650,7 +681,7 @@ private fun LatexMessageWebView(text: String) {
 }
 
 private fun latexHtmlDocument(text: String): String {
-    val body = escapeHtml(text)
+    val body = markdownToHtml(text)
     return """
         <!doctype html>
         <html>
@@ -677,30 +708,66 @@ private fun latexHtmlDocument(text: String): String {
                     margin: 0;
                     padding: 0;
                     background: transparent;
-                    color: #161719;
-                    font-family: sans-serif;
-                    font-size: 16px;
+                    color: #F8FAFC;
+                    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                    font-size: 15px;
                     line-height: 1.45;
-                    overflow: hidden;
+                    overflow: visible;
                 }
                 #content {
-                    white-space: pre-wrap;
                     overflow-wrap: anywhere;
                     word-break: normal;
                     padding: 0;
                 }
+                .p {
+                    margin: 0 0 0.55em 0;
+                }
+                .p:last-child {
+                    margin-bottom: 0;
+                }
+                strong {
+                    font-weight: 750;
+                    color: #F8FAFC;
+                }
+                em {
+                    font-style: italic;
+                    color: #F8FAFC;
+                }
+                h3 {
+                    margin: 0.8em 0 0.35em;
+                    font-size: 16px;
+                    line-height: 1.25;
+                    font-weight: 750;
+                    color: #F8FAFC;
+                }
+                .bullet {
+                    display: grid;
+                    grid-template-columns: 14px 1fr;
+                    gap: 4px;
+                    margin: 0 0 0.4em 0;
+                }
+                .bullet::before {
+                    content: "-";
+                    color: #A1A1AA;
+                }
+                hr {
+                    border: 0;
+                    border-top: 1px solid #3F3F46;
+                    margin: 0.8em 0;
+                }
                 mjx-container[jax="CHTML"][display="true"] {
                     overflow-x: auto;
-                    overflow-y: hidden;
+                    overflow-y: visible;
                     max-width: 100%;
-                    margin: 0.65em 0;
-                    padding: 0.7em 0.8em;
-                    border-radius: 12px;
-                    background: #EAF6F7;
-                    color: #247455;
+                    margin: 0.7em 0;
+                    padding: 0.65em 0.7em;
+                    border-radius: 6px;
+                    border: 1px solid #3F3F46;
+                    background: #18181B;
+                    color: #F8FAFC;
                 }
                 mjx-container[jax="CHTML"]:not([display="true"]) {
-                    color: #247455;
+                    color: #F8FAFC;
                 }
             </style>
         </head>
@@ -711,9 +778,10 @@ private fun latexHtmlDocument(text: String): String {
                     const height = Math.max(
                         document.body.scrollHeight,
                         document.documentElement.scrollHeight,
-                        document.getElementById('content').scrollHeight
+                        document.getElementById('content').scrollHeight,
+                        document.getElementById('content').getBoundingClientRect().height
                     );
-                    BudgieLayout.setHeight(height);
+                    BudgieLayout.setHeight(Math.ceil(height));
                 }
                 window.budgieTypeset = function() {
                     if (window.MathJax && MathJax.typesetPromise) {
@@ -735,6 +803,25 @@ private fun latexHtmlDocument(text: String): String {
     """.trimIndent()
 }
 
+private fun markdownToHtml(value: String): String = value
+    .lines()
+    .joinToString("") { rawLine ->
+        val line = rawLine.trimEnd()
+        when {
+            line.isBlank() -> """<div class="p"></div>"""
+            line.trim() == "---" -> "<hr>"
+            line.startsWith("### ") -> "<h3>${inlineMarkdown(line.removePrefix("### ").trim())}</h3>"
+            line.startsWith("## ") -> "<h3>${inlineMarkdown(line.removePrefix("## ").trim())}</h3>"
+            line.startsWith("# ") -> "<h3>${inlineMarkdown(line.removePrefix("# ").trim())}</h3>"
+            line.trimStart().startsWith("- ") -> """<div class="bullet">${inlineMarkdown(line.trimStart().removePrefix("- ").trim())}</div>"""
+            else -> """<div class="p">${inlineMarkdown(line)}</div>"""
+        }
+    }
+
+private fun inlineMarkdown(value: String): String = escapeHtml(value)
+    .replace(Regex("""\*\*([^*]+)\*\*"""), "<strong>$1</strong>")
+    .replace(Regex("""(?<!\*)\*([^*\n]+)\*(?!\*)"""), "<em>$1</em>")
+
 private fun escapeHtml(value: String): String = buildString {
     value.forEach { char ->
         when (char) {
@@ -749,11 +836,10 @@ private fun escapeHtml(value: String): String = buildString {
 }
 
 @Composable
-private fun BudgieAvatar() {
+private fun BudgieAvatar(modifier: Modifier = Modifier.size(28.dp)) {
     Box(
-        Modifier
-            .size(36.dp)
-            .background(Color.White, CircleShape)
+        modifier
+            .background(Surface, RoundedCornerShape(6.dp))
             .padding(4.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -770,8 +856,13 @@ private fun WaitingBubble() {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         BudgieAvatar()
         Spacer(Modifier.size(8.dp))
-        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = AssistantBubble)) {
-            CircularProgressIndicator(Modifier.padding(14.dp).size(18.dp), color = Sky, strokeWidth = 2.dp)
+        Card(
+            shape = RoundedCornerShape(6.dp),
+            colors = CardDefaults.cardColors(containerColor = AssistantBubble),
+            border = BorderStroke(1.dp, Accent),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        ) {
+            CircularProgressIndicator(Modifier.padding(12.dp).size(16.dp), color = Ink, strokeWidth = 2.dp)
         }
     }
 }
@@ -779,7 +870,7 @@ private fun WaitingBubble() {
 @Composable
 private fun MessageComposer(value: String, isWaiting: Boolean, onValueChange: (String) -> Unit, onSend: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().background(Paper).navigationBarsPadding().imePadding().padding(horizontal = 12.dp, vertical = 10.dp),
+        modifier = Modifier.fillMaxWidth().background(Paper).navigationBarsPadding().imePadding().padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -789,15 +880,31 @@ private fun MessageComposer(value: String, isWaiting: Boolean, onValueChange: (S
             Modifier.weight(1f),
             placeholder = { Text("Message") },
             maxLines = 5,
-            shape = RoundedCornerShape(22.dp),
+            shape = RoundedCornerShape(6.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Ink,
+                unfocusedTextColor = Ink,
+                focusedBorderColor = Accent,
+                unfocusedBorderColor = Accent,
+                focusedContainerColor = Paper,
+                unfocusedContainerColor = Paper,
+                cursorColor = Ink,
+                focusedPlaceholderColor = Muted,
+                unfocusedPlaceholderColor = Muted,
+            ),
         )
         Button(
             onClick = onSend,
             enabled = value.isNotBlank() && !isWaiting,
             modifier = Modifier.size(52.dp),
-            shape = CircleShape,
+            shape = RoundedCornerShape(6.dp),
             contentPadding = PaddingValues(0.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Accent),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Ink,
+                contentColor = Paper,
+                disabledContainerColor = Surface,
+                disabledContentColor = Muted,
+            ),
         ) {
             Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Send")
         }
@@ -807,11 +914,11 @@ private fun MessageComposer(value: String, isWaiting: Boolean, onValueChange: (S
 @Composable
 private fun AlphaTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = androidx.compose.material3.lightColorScheme(
+        colorScheme = androidx.compose.material3.darkColorScheme(
             primary = Accent,
-            onPrimary = Color.White,
-            secondary = Sky,
-            tertiary = Sun,
+            onPrimary = Ink,
+            secondary = Accent,
+            tertiary = Accent,
             background = Paper,
             onBackground = Ink,
             surface = Surface,
