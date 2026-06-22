@@ -701,6 +701,8 @@ private enum class SearchKind(val label: String) {
 
 private data class SearchRequest(val kind: SearchKind, val query: String)
 
+private data class EncodedImage(val mimeType: String, val base64: String)
+
 private object WebTools {
     fun run(request: SearchRequest): String = when (request.kind) {
         SearchKind.WEB -> search("https://duckduckgo.com/html/?q=${encode(request.query)}", request)
@@ -708,6 +710,20 @@ private object WebTools {
     }
 
     fun imageDataUrl(context: Context, uriText: String): String? = runCatching {
+        encodeImage(context, uriText)?.let { image ->
+            "data:${image.mimeType};base64,${image.base64}"
+        }
+    }.getOrNull()
+
+    fun imageInlineData(context: Context, uriText: String): JSONObject? = runCatching {
+        encodeImage(context, uriText)?.let { image ->
+            JSONObject()
+                .put("mime_type", image.mimeType)
+                .put("data", image.base64)
+        }
+    }.getOrNull()
+
+    private fun encodeImage(context: Context, uriText: String): EncodedImage? {
         val uri = Uri.parse(uriText)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -717,12 +733,12 @@ private object WebTools {
             .first { largestSide / it <= maxSide || it >= 8 }
         val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
         val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
-            ?: return@runCatching null
+            ?: return null
         val output = ByteArrayOutputStream()
         bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, output)
         bitmap.recycle()
-        "data:image/jpeg;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
-    }.getOrNull()
+        return EncodedImage("image/jpeg", Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP))
+    }
 
     private fun search(url: String, request: SearchRequest): String = runCatching {
         val html = httpGet(url)
@@ -906,7 +922,7 @@ private fun cleanProviderText(text: String, allowToolRequest: Boolean = false): 
 private object AiClient {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a useful assistant. Keep the personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock when natural. Do not roleplay as a human, do not overdo bird sounds, and keep answers practical, accurate, and concise. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math. You can use in-app tools. If web results are needed, reply with exactly [[web_search: query]]. If image results are needed, reply with exactly [[image_search: query]]. After tool results are provided, answer normally and cite result links when relevant."
+    private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a practical AI agent. Keep the budgie personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock only when natural. Act like an agent, not a passive chatbot: infer the user's goal, decide the next useful step, use available tools when current information is needed, and give the user a direct result. Ask a short clarifying question only when you cannot safely continue without it. For multi-step tasks, briefly state what you are doing, then provide the answer or next action. Use persistent memory when relevant, but never mention the memory block directly. Be practical, accurate, concise, and avoid filler. For current facts, websites, people, products, or anything likely to change, use web search instead of guessing. If web results are needed, reply with exactly [[web_search: query]]. If image results are needed, reply with exactly [[image_search: query]]. After tool results are provided, answer normally and cite result links when relevant. When an image is provided, inspect it directly and answer the user's request about it; if no request is included, describe the important contents and likely next useful actions. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
 
     private val providers: List<AiProvider>
         get() = listOf(
@@ -928,6 +944,20 @@ private object AiClient {
     }
 
     private fun requestWithFallback(context: Context, memories: List<String>, messages: List<ChatMessage>): ChatReply {
+        val hasImage = messages.any { it.imageUri != null }
+        if (hasImage && BuildConfig.GEMINI_API_KEY.isNotBlank()) {
+            return runCatching {
+                val response = requestGeminiImage(context, memories, messages)
+                ChatReply(response.text, "Gemini Image", response.tokenCount)
+            }.getOrElse {
+                ChatReply(
+                    "I could not read that image with Gemini right now. Try a smaller image or add a short text description.",
+                    "Gemini Image",
+                    null,
+                )
+            }
+        }
+
         check(providers.isNotEmpty()) { "No AI provider is configured." }
         val failures = mutableListOf<String>()
         providers.forEach { provider ->
@@ -943,6 +973,72 @@ private object AiClient {
             PrimaryProviderName,
             null,
         )
+    }
+
+    private fun requestGeminiImage(context: Context, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
+        val latestUser = messages.lastOrNull { it.role == MessageRole.USER }
+            ?: error("No image message to send.")
+        val imagePart = latestUser.imageUri
+            ?.let { WebTools.imageInlineData(context, it) }
+            ?: error("The attached image could not be read.")
+        val promptText = latestUser.text.ifBlank { "Describe this image and answer any obvious question it raises." }
+        val memoryText = memories.takeIf { it.isNotEmpty() }
+            ?.joinToString("\n") { "- $it" }
+            ?.let { "\n\nPersistent user memory. Use only when relevant and do not mention this memory block directly:\n$it" }
+            .orEmpty()
+        val body = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().put("text", "$SYSTEM_PROMPT$memoryText\n\nUser request: $promptText"))
+                        put(JSONObject().put("inline_data", imagePart))
+                    })
+                })
+            })
+            put("generationConfig", JSONObject().apply {
+                put("temperature", 0.7)
+                put("maxOutputTokens", 1200)
+            })
+        }.toString()
+
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${URLEncoder.encode(BuildConfig.GEMINI_API_KEY, StandardCharsets.UTF_8.name())}"
+        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 30_000
+            readTimeout = 90_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+        }
+
+        return try {
+            connection.outputStream.bufferedWriter().use { it.write(body) }
+            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
+            val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val response = JSONObject(responseText.ifBlank { "{}" })
+            if (connection.responseCode !in 200..299) {
+                error(response.optJSONObject("error")?.optString("message") ?: "Gemini image request failed (${connection.responseCode}).")
+            }
+            val text = response.optJSONArray("candidates")
+                ?.optJSONObject(0)
+                ?.optJSONObject("content")
+                ?.optJSONArray("parts")
+                ?.let { parts ->
+                    buildString {
+                        for (index in 0 until parts.length()) {
+                            val partText = parts.optJSONObject(index)?.optString("text").orEmpty()
+                            if (partText.isNotBlank()) append(partText)
+                        }
+                    }
+                }
+                ?.trim()
+                ?.ifBlank { null }
+                ?: error("Gemini returned an empty image response.")
+            val tokenCount = response.optJSONObject("usageMetadata")?.optInt("totalTokenCount")?.takeIf { it > 0 }
+            ProviderResponse(cleanProviderText(text), tokenCount)
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun requestWithTools(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
