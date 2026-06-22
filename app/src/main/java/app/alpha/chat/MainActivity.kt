@@ -67,11 +67,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -125,6 +127,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
 import java.net.URL
+import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -706,9 +709,19 @@ private object WebTools {
 
     fun imageDataUrl(context: Context, uriText: String): String? = runCatching {
         val uri = Uri.parse(uriText)
-        val mimeType = context.contentResolver.getType(uri)?.takeIf { it.startsWith("image/") } ?: "image/jpeg"
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-        "data:$mimeType;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val maxSide = 1280
+        val largestSide = maxOf(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
+        val sampleSize = generateSequence(1) { it * 2 }
+            .first { largestSide / it <= maxSide || it >= 8 }
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+            ?: return@runCatching null
+        val output = ByteArrayOutputStream()
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, output)
+        bitmap.recycle()
+        "data:image/jpeg;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
     }.getOrNull()
 
     private fun search(url: String, request: SearchRequest): String = runCatching {
@@ -805,19 +818,87 @@ private fun directSearchRequest(text: String): SearchRequest? {
     return when {
         lower.startsWith("web search ") -> SearchRequest(SearchKind.WEB, trimmed.drop(11).trim())
         lower.startsWith("search web ") -> SearchRequest(SearchKind.WEB, trimmed.drop(11).trim())
+        lower.startsWith("look online for ") -> SearchRequest(SearchKind.WEB, trimmed.drop(16).trim())
+        lower.startsWith("look online ") -> SearchRequest(SearchKind.WEB, trimmed.drop(12).trim())
+        lower.startsWith("search online for ") -> SearchRequest(SearchKind.WEB, trimmed.drop(18).trim())
+        lower.startsWith("search online ") -> SearchRequest(SearchKind.WEB, trimmed.drop(14).trim())
+        lower.contains(" online about ") -> SearchRequest(SearchKind.WEB, trimmed.drop(lower.indexOf(" online about ") + 14).trim())
+        lower.startsWith("what's ") && lower.contains(".") -> SearchRequest(SearchKind.WEB, trimmed)
+        lower.startsWith("what is ") && lower.contains(".") -> SearchRequest(SearchKind.WEB, trimmed)
         lower.startsWith("image search ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(13).trim())
         lower.startsWith("search images ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(14).trim())
         else -> null
     }?.takeIf { it.query.isNotBlank() }
 }
 
-private fun cleanProviderText(text: String): String {
+private fun directSearchRequest(messages: List<ChatMessage>): SearchRequest? {
+    val latest = messages.lastOrNull { it.role == MessageRole.USER }?.text.orEmpty()
+    directSearchRequest(latest)?.let { return it }
+    val lower = latest.trim().lowercase()
+    if (lower == "look online" || lower == "search online" || lower == "check online") {
+        val previous = messages
+            .asReversed()
+            .drop(1)
+            .firstOrNull { it.role == MessageRole.USER && it.text.isNotBlank() }
+            ?.text
+            .orEmpty()
+        return previous.takeIf { it.isNotBlank() }?.let { SearchRequest(SearchKind.WEB, it) }
+    }
+    return null
+}
+
+private fun directLocalAnswer(text: String): String? {
+    val lower = text.trim().lowercase()
+    val asksTime = lower.contains("time")
+    val asksDate = lower.contains("date") || lower.contains("day") || lower.contains("today")
+    if (!asksTime && !asksDate) return null
+    val pattern = when {
+        asksTime && asksDate -> "EEEE, d MMMM yyyy, HH:mm"
+        asksTime -> "HH:mm"
+        else -> "EEEE, d MMMM yyyy"
+    }
+    val value = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).format(java.util.Date())
+    return when {
+        asksTime && asksDate -> "It is $value on this device."
+        asksTime -> "It is $value on this device."
+        else -> "Today is $value on this device."
+    }
+}
+
+private fun toolFallbackAnswer(toolContext: String): String {
+    val lines = toolContext
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.startsWith("Tool results for") && !it.startsWith("Search note:") }
+        .take(8)
+        .toList()
+    return if (lines.isEmpty()) {
+        "I searched online, but the in-app search provider did not return usable results for that query."
+    } else {
+        "I searched online and found these results:\n\n${lines.joinToString("\n")}"
+    }
+}
+
+private fun cleanProviderText(text: String, allowToolRequest: Boolean = false): String {
     val trimmed = text.trim()
+    if (trimmed.equals("null", ignoreCase = true) || trimmed == "[]") {
+        error("The model returned an unusable empty response.")
+    }
+    parseSearchRequest(trimmed)?.let {
+        if (allowToolRequest) return trimmed
+        error("The model returned a tool request instead of an answer.")
+    }
+    if (trimmed.startsWith("User Safety:", ignoreCase = true) ||
+        trimmed.startsWith("Response Safety:", ignoreCase = true) ||
+        trimmed.contains("Response Safety:", ignoreCase = true)
+    ) {
+        error("The model returned provider safety metadata instead of an answer.")
+    }
     val safetyOnly = Regex(
         """(?is)^\s*User Safety:\s*(safe|unsafe)\s*Response Safety:\s*(safe|unsafe)(\s*Safety Categories:\s*.+?)?\s*$""",
     )
     if (safetyOnly.matches(trimmed)) {
-        return "I could not get a usable answer from the current free router for that request. Try rephrasing it with a little more detail."
+        error("The model returned provider safety metadata instead of an answer.")
     }
     return trimmed
 }
@@ -834,6 +915,7 @@ private object AiClient {
                 "https://openrouter.ai/api/v1/chat/completions",
                 "openrouter/free",
                 BuildConfig.OPENROUTER_API_KEY,
+                supportsImages = true,
             ),
         ).filter { it.name.isNotBlank() && it.endpoint.isNotBlank() && it.model.isNotBlank() && it.apiKey.isNotBlank() }
 
@@ -856,42 +938,67 @@ private object AiClient {
                 failures += "${provider.name}: ${error.message ?: "request failed"}"
             }
         }
-        error("All AI providers failed. ${failures.joinToString(" | ")}")
-    }
-
-    private fun requestWithTools(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
-        if (!provider.supportsImages && messages.any { it.imageUri != null }) {
-            return ProviderResponse(
-                "I can show the attached image here, but the current OpenRouter Free Router endpoint does not support image input. Send a text description of the image and I can help from that.",
-                null,
-            )
-        }
-
-        val directSearch = directSearchRequest(messages.lastOrNull { it.role == MessageRole.USER }?.text.orEmpty())
-        if (directSearch != null) {
-            val toolContext = WebTools.run(directSearch)
-            BackendSync.logToolCall(context, directSearch.kind, directSearch.query, toolContext, true)
-            return request(context, provider, memories, messages, toolContext)
-        }
-
-        val firstResponse = request(context, provider, memories, messages)
-        val requestedSearch = parseSearchRequest(firstResponse.text) ?: return firstResponse
-        val toolContext = WebTools.run(requestedSearch)
-        BackendSync.logToolCall(context, requestedSearch.kind, requestedSearch.query, toolContext, true)
-        return request(
-            context = context,
-            provider = provider,
-            memories = memories,
-            messages = messages + ChatMessage(
-                id = System.nanoTime(),
-                role = MessageRole.ASSISTANT,
-                text = "Tool request: ${requestedSearch.kind.label} ${requestedSearch.query}",
-            ),
-            toolContext = toolContext,
+        return ChatReply(
+            "I could not get a usable answer from the current free router. Try again or rephrase the request.",
+            PrimaryProviderName,
+            null,
         )
     }
 
-    private fun request(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>, toolContext: String? = null): ProviderResponse {
+    private fun requestWithTools(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
+        if (messages.any { it.imageUri != null }) {
+            val latestUser = messages.lastOrNull { it.role == MessageRole.USER }
+            if (latestUser?.text.isNullOrBlank()) {
+                val imagePrompt = ChatMessage(
+                    id = latestUser?.id ?: System.nanoTime(),
+                    role = MessageRole.USER,
+                    text = "Describe this image and answer any obvious question it raises.",
+                    imageUri = latestUser?.imageUri,
+                )
+                return request(context, provider, memories, messages.dropLast(1) + imagePrompt)
+            }
+        }
+
+        directLocalAnswer(messages.lastOrNull { it.role == MessageRole.USER }?.text.orEmpty())?.let {
+            return ProviderResponse(it, null)
+        }
+
+        val directSearch = directSearchRequest(messages)
+        if (directSearch != null) {
+            val toolContext = WebTools.run(directSearch)
+            BackendSync.logToolCall(context, directSearch.kind, directSearch.query, toolContext, true)
+            return runCatching {
+                request(context, provider, memories, messages, toolContext)
+            }.getOrElse {
+                ProviderResponse(toolFallbackAnswer(toolContext), null)
+            }
+        }
+
+        val firstResponse = request(context, provider, memories, messages, allowToolRequest = true)
+        val requestedSearch = parseSearchRequest(firstResponse.text) ?: return firstResponse
+        val toolContext = WebTools.run(requestedSearch)
+        BackendSync.logToolCall(context, requestedSearch.kind, requestedSearch.query, toolContext, true)
+        return runCatching {
+            request(
+                context = context,
+                provider = provider,
+                memories = memories,
+                messages = messages,
+                toolContext = toolContext,
+            )
+        }.getOrElse {
+            ProviderResponse(toolFallbackAnswer(toolContext), null)
+        }
+    }
+
+    private fun request(
+        context: Context,
+        provider: AiProvider,
+        memories: List<String>,
+        messages: List<ChatMessage>,
+        toolContext: String? = null,
+        allowToolRequest: Boolean = false,
+    ): ProviderResponse {
         val requestBody = JSONObject().apply {
             put("model", provider.model)
             put("messages", JSONArray().apply {
@@ -943,7 +1050,7 @@ private object AiClient {
                 .getString("content")
                 .trim()
                 .ifBlank { error("The model returned an empty response.") }
-                .let(::cleanProviderText)
+                .let { cleanProviderText(it, allowToolRequest) }
             val usage = response.optJSONObject("usage")
             val tokenCount = usage?.takeIf { it.has("total_tokens") }?.optInt("total_tokens")
             ProviderResponse(text, tokenCount)
@@ -986,6 +1093,7 @@ private fun ChatApp() {
     var typingChatId by rememberSaveable { mutableStateOf<String?>(null) }
     var typingMessageId by rememberSaveable { mutableStateOf<Long?>(null) }
     var typingText by rememberSaveable { mutableStateOf("") }
+    var showAdTokensPage by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -1156,19 +1264,40 @@ private fun ChatApp() {
             topBar = {
                 TopAppBar(
                     navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Rounded.Menu, contentDescription = "Recent chats")
+                        if (showAdTokensPage) {
+                            IconButton(onClick = { showAdTokensPage = false }) {
+                                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to chat")
+                            }
+                        } else {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Rounded.Menu, contentDescription = "Recent chats")
+                            }
                         }
                     },
                     title = {
                         Column {
-                            Text(currentTitle, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("Using $activeProvider", color = Muted, fontSize = 12.sp)
+                            Text(
+                                if (showAdTokensPage) "Extra tokens" else currentTitle,
+                                color = Ink,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                if (showAdTokensPage) "Ads reward page" else "Using $activeProvider",
+                                color = Muted,
+                                fontSize = 12.sp,
+                            )
                         }
                     },
                     actions = {
-                        IconButton(onClick = ::createNewChat) {
-                            Icon(Icons.Rounded.Add, contentDescription = "New chat")
+                        if (!showAdTokensPage) {
+                            IconButton(onClick = { showAdTokensPage = true }) {
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Watch ads for extra tokens")
+                            }
+                            IconButton(onClick = ::createNewChat) {
+                                Icon(Icons.Rounded.Add, contentDescription = "New chat")
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -1185,7 +1314,12 @@ private fun ChatApp() {
                     .padding(padding)
                     .consumeWindowInsets(padding),
             ) {
-                if (messages.isEmpty()) {
+                if (showAdTokensPage) {
+                    ExtraTokensPage(
+                        modifier = Modifier.weight(1f),
+                        onBack = { showAdTokensPage = false },
+                    )
+                } else if (messages.isEmpty()) {
                     EmptyChat(Modifier.weight(1f))
                 } else {
                     LazyColumn(
@@ -1203,16 +1337,55 @@ private fun ChatApp() {
                         if (isWaiting) item { WaitingBubble() }
                     }
                 }
-                MessageComposer(
-                    value = draft,
-                    isWaiting = isWaiting,
-                    pendingImageUri = pendingImageUri,
-                    onValueChange = { draft = it },
-                    onAttachImage = { imagePicker.launch(arrayOf("image/*")) },
-                    onClearImage = { pendingImageUri = null },
-                    onSend = ::sendMessage,
-                )
+                if (!showAdTokensPage) {
+                    MessageComposer(
+                        value = draft,
+                        isWaiting = isWaiting,
+                        pendingImageUri = pendingImageUri,
+                        onValueChange = { draft = it },
+                        onAttachImage = { imagePicker.launch(arrayOf("image/*")) },
+                        onClearImage = { pendingImageUri = null },
+                        onSend = ::sendMessage,
+                    )
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun ExtraTokensPage(modifier: Modifier = Modifier, onBack: () -> Unit) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Text(
+            "This page will be for watching ads for extra tokens.",
+            color = Ink,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 28.sp,
+        )
+        Text(
+            "Rewarded ads and token crediting will be connected here.",
+            color = Muted,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+        )
+        Button(
+            onClick = onBack,
+            shape = RoundedCornerShape(6.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Surface,
+                contentColor = Ink,
+            ),
+            border = BorderStroke(1.dp, Accent),
+        ) {
+            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.size(8.dp))
+            Text("Back")
         }
     }
 }
