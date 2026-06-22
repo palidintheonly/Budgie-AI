@@ -185,24 +185,29 @@ private object AdMobInterstitials {
     fun showIfReady(activity: MainActivity) {
         val ad = interstitialAd
         if (ad == null) {
+            BackendSync.logAdEvent(activity, AD_UNIT_ID, "load_started")
             load(activity)
             return
         }
         interstitialAd = null
         ad.fullScreenContentCallback = object : FullScreenContentCallback() {
             override fun onAdDismissedFullScreenContent() {
+                BackendSync.logAdEvent(activity, AD_UNIT_ID, "dismissed")
                 load(activity)
             }
 
             override fun onAdFailedToShowFullScreenContent(adError: AdError) {
+                BackendSync.logAdEvent(activity, AD_UNIT_ID, "show_failed", adError.code.toString(), adError.message)
                 load(activity)
             }
         }
+        BackendSync.logAdEvent(activity, AD_UNIT_ID, "shown")
         ad.show(activity)
     }
 
     private fun load(activity: MainActivity, showAfterLoad: Boolean = false) {
         if (isLoading || interstitialAd != null) return
+        BackendSync.logAdEvent(activity, AD_UNIT_ID, "load_started")
         isLoading = true
         InterstitialAd.load(
             activity,
@@ -212,12 +217,14 @@ private object AdMobInterstitials {
                 override fun onAdLoaded(ad: InterstitialAd) {
                     interstitialAd = ad
                     isLoading = false
+                    BackendSync.logAdEvent(activity, AD_UNIT_ID, "loaded")
                     if (showAfterLoad) showIfReady(activity)
                 }
 
                 override fun onAdFailedToLoad(error: LoadAdError) {
                     interstitialAd = null
                     isLoading = false
+                    BackendSync.logAdEvent(activity, AD_UNIT_ID, "load_failed", error.code.toString(), error.message)
                 }
             },
         )
@@ -229,7 +236,122 @@ private object FirebaseEvents {
         runCatching {
             val bundle = Bundle().apply(params)
             FirebaseAnalytics.getInstance(context).logEvent(name, bundle)
+            BackendSync.logAnalyticsEvent(context, name, bundle)
         }
+    }
+}
+
+private object BackendSync {
+    private const val PREFS = "backend_sync"
+    private const val DEVICE_UUID = "device_uuid"
+    private val executor = Executors.newSingleThreadExecutor()
+
+    fun syncConversation(context: Context, conversation: Conversation) {
+        post(context, "sync_conversation", conversation.toBackendJson())
+    }
+
+    fun deleteConversation(context: Context, conversationId: String) {
+        post(context, "delete_conversation", JSONObject().put("conversation_id", conversationId))
+    }
+
+    fun syncMemoryFacts(context: Context, facts: List<String>) {
+        if (facts.isEmpty()) return
+        post(context, "sync_memory", JSONObject().put("facts", JSONArray().apply {
+            facts.forEach { fact ->
+                put(JSONObject().apply {
+                    put("fact_type", fact.substringBefore(":", "note").trim().ifBlank { "note" })
+                    put("fact_value", fact.substringAfter(":", fact).trim())
+                })
+            }
+        }))
+    }
+
+    fun logToolCall(context: Context, kind: SearchKind, query: String, resultSummary: String?, success: Boolean) {
+        post(
+            context,
+            "log_tool_call",
+            JSONObject()
+                .put("tool_type", kind.label)
+                .put("query", query)
+                .put("result_summary", resultSummary.orEmpty())
+                .put("success", success),
+        )
+    }
+
+    fun logReminder(context: Context, message: String, source: String) {
+        post(
+            context,
+            "log_reminder",
+            JSONObject()
+                .put("message_text", message)
+                .put("source", source),
+        )
+    }
+
+    fun logAnalyticsEvent(context: Context, name: String, bundle: Bundle) {
+        post(
+            context,
+            "log_analytics",
+            JSONObject()
+                .put("event_name", name)
+                .put("event_params", bundle.toJson()),
+        )
+    }
+
+    fun logAdEvent(context: Context, adUnitId: String, eventName: String, errorCode: String? = null, errorMessage: String? = null) {
+        post(
+            context,
+            "log_ad",
+            JSONObject()
+                .put("ad_unit_id", adUnitId)
+                .put("event_name", eventName)
+                .put("error_code", errorCode)
+                .put("error_message", errorMessage),
+        )
+    }
+
+    private fun post(context: Context, action: String, payload: JSONObject) {
+        val endpoint = BuildConfig.BACKEND_SYNC_URL
+        val key = BuildConfig.BACKEND_SYNC_KEY
+        if (endpoint.isBlank() || key.isBlank()) return
+        val appContext = context.applicationContext
+        executor.execute {
+            runCatching {
+                val body = JSONObject()
+                    .put("action", action)
+                    .put("device_uuid", deviceUuid(appContext))
+                    .put("app_version_name", BuildConfig.VERSION_NAME)
+                    .put("app_version_code", BuildConfig.VERSION_CODE)
+                    .put("payload", payload)
+                    .toString()
+                val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 8_000
+                    readTimeout = 12_000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("X-Budgie-Sync-Key", key)
+                }
+                try {
+                    connection.outputStream.bufferedWriter().use { it.write(body) }
+                    if (connection.responseCode !in 200..299) {
+                        connection.errorStream?.close()
+                    } else {
+                        connection.inputStream?.close()
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            }
+        }
+    }
+
+    private fun deviceUuid(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.getString(DEVICE_UUID, null)?.let { return it }
+        val id = UUID.randomUUID().toString()
+        prefs.edit().putString(DEVICE_UUID, id).apply()
+        return id
     }
 }
 
@@ -294,8 +416,10 @@ private object ReminderScheduler {
         }
 
         ensureNotificationChannel(context)
-        val message = ReminderContent.generate()
+        val reminder = ReminderContent.generate()
+        val message = reminder.text
         FirebaseEvents.log(context, "reminder_notification_shown")
+        BackendSync.logReminder(context, message, reminder.source)
         val launchIntent = PendingIntent.getActivity(
             context,
             0,
@@ -325,8 +449,10 @@ private object ReminderScheduler {
     )
 }
 
+private data class GeneratedReminder(val text: String, val source: String)
+
 private object ReminderContent {
-    fun generate(): String = runCatching {
+    fun generate(): GeneratedReminder = runCatching {
         if (BuildConfig.OPENROUTER_API_KEY.isBlank()) return@runCatching fallback()
         val body = JSONObject().apply {
             put("model", "openrouter/free")
@@ -363,21 +489,22 @@ private object ReminderContent {
                 ?.optString("content")
                 ?.trim()
                 ?.take(120)
-                ?.ifBlank { fallback() }
+                ?.ifBlank { fallback().text }
+                ?.let { GeneratedReminder(it, "ai") }
                 ?: fallback()
         } finally {
             connection.disconnect()
         }
     }.getOrDefault(fallback())
 
-    private fun fallback(): String {
+    private fun fallback(): GeneratedReminder {
         val options = listOf(
             "Chirp. A fresh idea is waiting in Budgie AI.",
             "Come back to Budgie AI and make something useful.",
             "Budgie AI is ready for your next question.",
             "Quick flock check: want to create something new?",
         )
-        return options[(System.currentTimeMillis() / 1000 % options.size).toInt()]
+        return GeneratedReminder(options[(System.currentTimeMillis() / 1000 % options.size).toInt()], "fallback")
     }
 }
 
@@ -400,6 +527,7 @@ private data class Conversation(
 )
 
 private class ConversationStore(context: Context) {
+    private val appContext = context.applicationContext
     private val preferences = context.getSharedPreferences("chat_history", Context.MODE_PRIVATE)
 
     @Synchronized
@@ -415,11 +543,13 @@ private class ConversationStore(context: Context) {
         if (conversation.messages.isEmpty()) return
         val conversations = loadAll().filterNot { it.id == conversation.id } + conversation
         saveAll(conversations.sortedByDescending { it.updatedAt }.take(100))
+        BackendSync.syncConversation(appContext, conversation)
     }
 
     @Synchronized
     fun delete(id: String) {
         saveAll(loadAll().filterNot { it.id == id })
+        BackendSync.deleteConversation(appContext, id)
     }
 
     private fun saveAll(conversations: List<Conversation>) {
@@ -485,6 +615,38 @@ private fun Conversation.toJson() = JSONObject().apply {
             })
         }
     })
+}
+
+private fun Conversation.toBackendJson() = JSONObject().apply {
+    put("conversation_id", id)
+    put("title", title)
+    put("updated_at", updatedAt)
+    put("provider_name", providerName)
+    put("messages", JSONArray().apply {
+        messages.forEach { message ->
+            put(JSONObject().apply {
+                put("message_id", message.id)
+                put("role", message.role.name)
+                put("text", message.text)
+                message.tokenCount?.let { put("token_count", it) }
+                message.imageUri?.let { put("image_uri", it) }
+            })
+        }
+    })
+}
+
+private fun Bundle.toJson() = JSONObject().apply {
+    keySet().forEach { key ->
+        when (val value = get(key)) {
+            null -> put(key, JSONObject.NULL)
+            is Boolean -> put(key, value)
+            is Int -> put(key, value)
+            is Long -> put(key, value)
+            is Float -> put(key, value.toDouble())
+            is Double -> put(key, value)
+            else -> put(key, value.toString())
+        }
+    }
 }
 
 private fun JSONObject.toConversation(): Conversation {
@@ -708,12 +870,14 @@ private object AiClient {
         val directSearch = directSearchRequest(messages.lastOrNull { it.role == MessageRole.USER }?.text.orEmpty())
         if (directSearch != null) {
             val toolContext = WebTools.run(directSearch)
+            BackendSync.logToolCall(context, directSearch.kind, directSearch.query, toolContext, true)
             return request(context, provider, memories, messages, toolContext)
         }
 
         val firstResponse = request(context, provider, memories, messages)
         val requestedSearch = parseSearchRequest(firstResponse.text) ?: return firstResponse
         val toolContext = WebTools.run(requestedSearch)
+        BackendSync.logToolCall(context, requestedSearch.kind, requestedSearch.query, toolContext, true)
         return request(
             context = context,
             provider = provider,
@@ -908,7 +1072,10 @@ private fun ChatApp() {
         val memoryBefore = memoryStore.load().size
         memoryStore.learnFromUserMessage(text)
         val memories = memoryStore.load()
-        if (memories.size > memoryBefore) FirebaseEvents.log(context, "memory_learned")
+        if (memories.size > memoryBefore) {
+            FirebaseEvents.log(context, "memory_learned")
+            BackendSync.syncMemoryFacts(context, memories)
+        }
         FirebaseEvents.log(context, "message_sent") {
             putString("has_image", (!imageUri.isNullOrBlank()).toString())
         }
