@@ -151,7 +151,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         FirebaseEvents.log(this, "app_opened")
-        AdMobInterstitials.initialize(this)
+        AdMobInterstitials.initialize(this, showOnLoad = true)
         adHandler.postDelayed(interstitialTick, 2 * 60 * 1000L)
         ReminderScheduler.ensureNotificationChannel(this)
         ReminderScheduler.scheduleHourly(this)
@@ -174,10 +174,10 @@ private object AdMobInterstitials {
     private var interstitialAd: InterstitialAd? = null
     private var isLoading = false
 
-    fun initialize(activity: MainActivity) {
+    fun initialize(activity: MainActivity, showOnLoad: Boolean = false) {
         Thread {
             MobileAds.initialize(activity) {
-                Handler(Looper.getMainLooper()).post { load(activity) }
+                Handler(Looper.getMainLooper()).post { load(activity, showOnLoad) }
             }
         }.start()
     }
@@ -201,7 +201,7 @@ private object AdMobInterstitials {
         ad.show(activity)
     }
 
-    private fun load(activity: MainActivity) {
+    private fun load(activity: MainActivity, showAfterLoad: Boolean = false) {
         if (isLoading || interstitialAd != null) return
         isLoading = true
         InterstitialAd.load(
@@ -212,6 +212,7 @@ private object AdMobInterstitials {
                 override fun onAdLoaded(ad: InterstitialAd) {
                     interstitialAd = ad
                     isLoading = false
+                    if (showAfterLoad) showIfReady(activity)
                 }
 
                 override fun onAdFailedToLoad(error: LoadAdError) {
