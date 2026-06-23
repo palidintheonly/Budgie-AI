@@ -843,6 +843,14 @@ private fun directSearchRequest(text: String): SearchRequest? {
         lower.startsWith("what is ") && lower.contains(".") -> SearchRequest(SearchKind.WEB, trimmed)
         lower.startsWith("image search ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(13).trim())
         lower.startsWith("search images ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(14).trim())
+        lower.startsWith("find images of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(15).trim())
+        lower.startsWith("find pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(17).trim())
+        lower.startsWith("show images of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(15).trim())
+        lower.startsWith("show pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(17).trim())
+        lower.startsWith("show me images of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(18).trim())
+        lower.startsWith("show me pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(20).trim())
+        lower.startsWith("photos of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(10).trim())
+        lower.startsWith("pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(12).trim())
         else -> null
     }?.takeIf { it.query.isNotBlank() }
 }
@@ -922,7 +930,7 @@ private fun cleanProviderText(text: String, allowToolRequest: Boolean = false): 
 private object AiClient {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a practical AI agent. Keep the budgie personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock only when natural. Act like an agent, not a passive chatbot: infer the user's goal, decide the next useful step, use available tools when current information is needed, and give the user a direct result. Ask a short clarifying question only when you cannot safely continue without it. For multi-step tasks, briefly state what you are doing, then provide the answer or next action. Use persistent memory when relevant, but never mention the memory block directly. Be practical, accurate, concise, and avoid filler. For current facts, websites, people, products, or anything likely to change, use web search instead of guessing. If web results are needed, reply with exactly [[web_search: query]]. If image results are needed, reply with exactly [[image_search: query]]. After tool results are provided, answer normally and cite result links when relevant. When an image is provided, inspect it directly and answer the user's request about it; if no request is included, describe the important contents and likely next useful actions. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
+    private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a practical AI agent. Keep the budgie personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock only when natural. Act like an agent, not a passive chatbot: infer the user's goal, decide the next useful step, use available tools when current information is needed, and give the user a direct result. Ask a short clarifying question only when you cannot safely continue without it. For multi-step tasks, briefly state what you are doing, then provide the answer or next action. Use persistent memory when relevant, but never mention the memory block directly. Be practical, accurate, concise, and avoid filler. Provider routing is handled by the app: normal text chat uses OpenRouter, attached image analysis uses Gemini, and requests to find/show images use image search. For current facts, websites, people, products, or anything likely to change, use web search instead of guessing. If web results are needed, reply with exactly [[web_search: query]]. If the user asks to find, show, or look up images, photos, or pictures, reply with exactly [[image_search: query]]. After tool results are provided, answer normally and cite result links when relevant. When an image is attached by the user, inspect it directly and answer the user's request about it; if no request is included, describe the important contents and likely next useful actions. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
 
     private val providers: List<AiProvider>
         get() = listOf(
@@ -931,7 +939,6 @@ private object AiClient {
                 "https://openrouter.ai/api/v1/chat/completions",
                 "openrouter/free",
                 BuildConfig.OPENROUTER_API_KEY,
-                supportsImages = true,
             ),
         ).filter { it.name.isNotBlank() && it.endpoint.isNotBlank() && it.model.isNotBlank() && it.apiKey.isNotBlank() }
 
@@ -945,7 +952,14 @@ private object AiClient {
 
     private fun requestWithFallback(context: Context, memories: List<String>, messages: List<ChatMessage>): ChatReply {
         val hasImage = messages.any { it.imageUri != null }
-        if (hasImage && BuildConfig.GEMINI_API_KEY.isNotBlank()) {
+        if (hasImage) {
+            if (BuildConfig.GEMINI_API_KEY.isBlank()) {
+                return ChatReply(
+                    "Image messages need Gemini to be configured. Text chat still uses OpenRouter.",
+                    "Gemini Image",
+                    null,
+                )
+            }
             return runCatching {
                 val response = requestGeminiImage(context, memories, messages)
                 ChatReply(response.text, "Gemini Image", response.tokenCount)
@@ -1043,16 +1057,7 @@ private object AiClient {
 
     private fun requestWithTools(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
         if (messages.any { it.imageUri != null }) {
-            val latestUser = messages.lastOrNull { it.role == MessageRole.USER }
-            if (latestUser?.text.isNullOrBlank()) {
-                val imagePrompt = ChatMessage(
-                    id = latestUser?.id ?: System.nanoTime(),
-                    role = MessageRole.USER,
-                    text = "Describe this image and answer any obvious question it raises.",
-                    imageUri = latestUser?.imageUri,
-                )
-                return request(context, provider, memories, messages.dropLast(1) + imagePrompt)
-            }
+            error("Image messages are routed to Gemini, not OpenRouter.")
         }
 
         directLocalAnswer(messages.lastOrNull { it.role == MessageRole.USER }?.text.orEmpty())?.let {
@@ -1063,28 +1068,31 @@ private object AiClient {
         if (directSearch != null) {
             val toolContext = WebTools.run(directSearch)
             BackendSync.logToolCall(context, directSearch.kind, directSearch.query, toolContext, true)
-            return runCatching {
-                request(context, provider, memories, messages, toolContext)
-            }.getOrElse {
-                ProviderResponse(toolFallbackAnswer(toolContext), null)
-            }
+            return requestWithToolFallback(context, provider, memories, messages, toolContext)
         }
 
         val firstResponse = request(context, provider, memories, messages, allowToolRequest = true)
         val requestedSearch = parseSearchRequest(firstResponse.text) ?: return firstResponse
         val toolContext = WebTools.run(requestedSearch)
         BackendSync.logToolCall(context, requestedSearch.kind, requestedSearch.query, toolContext, true)
-        return runCatching {
-            request(
-                context = context,
-                provider = provider,
-                memories = memories,
-                messages = messages,
-                toolContext = toolContext,
-            )
-        }.getOrElse {
+        return requestWithToolFallback(context, provider, memories, messages, toolContext)
+    }
+
+    private fun requestWithToolFallback(
+        context: Context,
+        provider: AiProvider,
+        memories: List<String>,
+        messages: List<ChatMessage>,
+        toolContext: String,
+    ): ProviderResponse = runCatching {
+        val response = request(context, provider, memories, messages, toolContext)
+        if (parseSearchRequest(response.text) != null) {
             ProviderResponse(toolFallbackAnswer(toolContext), null)
+        } else {
+            response
         }
+    }.getOrElse {
+        ProviderResponse(toolFallbackAnswer(toolContext), null)
     }
 
     private fun request(

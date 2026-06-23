@@ -29,7 +29,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.13-alpha"
+        versionName = "0.0.14-alpha"
         buildConfigField("String", "OPENROUTER_API_KEY", "\"${localString("OPENROUTER_API_KEY")}\"")
         buildConfigField("String", "GEMINI_API_KEY", "\"${localString("GEMINI_API_KEY")}\"")
         buildConfigField("String", "BACKEND_SYNC_URL", "\"${localString("BACKEND_SYNC_URL")}\"")
