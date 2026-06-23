@@ -1,4 +1,4 @@
-package app.alpha.chat
+package com.budgieai.app
 
 import android.annotation.SuppressLint
 import android.Manifest
@@ -163,7 +163,7 @@ class MainActivity : ComponentActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2001)
         }
-        setContent { AlphaTheme { ChatApp() } }
+        setContent { BudgieTheme { ChatApp() } }
     }
 
     override fun onDestroy() {
@@ -2048,7 +2048,7 @@ private fun MessageComposer(
 }
 
 @Composable
-private fun AlphaTheme(content: @Composable () -> Unit) {
+private fun BudgieTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = androidx.compose.material3.darkColorScheme(
             primary = Accent,
@@ -2067,5 +2067,5 @@ private fun AlphaTheme(content: @Composable () -> Unit) {
 @Preview(showBackground = true, widthDp = 390, heightDp = 844)
 @Composable
 private fun ChatPreview() {
-    AlphaTheme { ChatApp() }
+    BudgieTheme { ChatApp() }
 }

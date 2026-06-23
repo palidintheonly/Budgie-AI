@@ -17,5 +17,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Alpha"
+rootProject.name = "Budgie AI"
 include(":app")

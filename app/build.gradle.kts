@@ -21,15 +21,16 @@ fun localString(name: String): String = localProperties.getProperty(name, "")
     .replace("\"", "\\\"")
 
 android {
-    namespace = "app.alpha.chat"
+    namespace = "com.budgieai.app"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "app.alpha.chat"
+        applicationId = "com.budgieai.app"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.14-alpha"
+        versionName = "0.1.0-beta"
+        buildConfigField("String", "RELEASE_LABEL", "\"v1.5\"")
         buildConfigField("String", "OPENROUTER_API_KEY", "\"${localString("OPENROUTER_API_KEY")}\"")
         buildConfigField("String", "GEMINI_API_KEY", "\"${localString("GEMINI_API_KEY")}\"")
         buildConfigField("String", "BACKEND_SYNC_URL", "\"${localString("BACKEND_SYNC_URL")}\"")
