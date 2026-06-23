@@ -29,8 +29,8 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0-beta"
-        buildConfigField("String", "RELEASE_LABEL", "\"v1.5\"")
+        versionName = "0.1.1-beta"
+        buildConfigField("String", "RELEASE_LABEL", "\"v1\"")
         buildConfigField("String", "OPENROUTER_API_KEY", "\"${localString("OPENROUTER_API_KEY")}\"")
         buildConfigField("String", "GEMINI_API_KEY", "\"${localString("GEMINI_API_KEY")}\"")
         buildConfigField("String", "BACKEND_SYNC_URL", "\"${localString("BACKEND_SYNC_URL")}\"")

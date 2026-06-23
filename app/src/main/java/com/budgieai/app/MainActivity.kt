@@ -313,6 +313,18 @@ private object BackendSync {
         )
     }
 
+    fun syncProviderModels(context: Context, textModels: List<String>, visionModels: List<String>) {
+        if (textModels.isEmpty() && visionModels.isEmpty()) return
+        post(
+            context,
+            "sync_provider_models",
+            JSONObject()
+                .put("provider_name", PrimaryProviderName)
+                .put("text_models", JSONArray().apply { textModels.forEach { put(it) } })
+                .put("vision_models", JSONArray().apply { visionModels.forEach { put(it) } }),
+        )
+    }
+
     private fun post(context: Context, action: String, payload: JSONObject) {
         val endpoint = BuildConfig.BACKEND_SYNC_URL
         val key = BuildConfig.BACKEND_SYNC_KEY
@@ -832,6 +844,16 @@ private fun directSearchRequest(text: String): SearchRequest? {
     val trimmed = text.trim()
     val lower = trimmed.lowercase()
     return when {
+        lower.startsWith("show me a picture of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(21).trim())
+        lower.startsWith("show me pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(20).trim())
+        lower.startsWith("show me an image of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(20).trim())
+        lower.startsWith("show me images of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(18).trim())
+        lower.startsWith("show me a photo of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(19).trim())
+        lower.startsWith("show me photos of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(18).trim())
+        lower.startsWith("show me a ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(10).trim())
+        lower.startsWith("show me an ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(11).trim())
+        lower.startsWith("find me a picture of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(21).trim())
+        lower.startsWith("find me an image of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(20).trim())
         lower.startsWith("web search ") -> SearchRequest(SearchKind.WEB, trimmed.drop(11).trim())
         lower.startsWith("search web ") -> SearchRequest(SearchKind.WEB, trimmed.drop(11).trim())
         lower.startsWith("look online for ") -> SearchRequest(SearchKind.WEB, trimmed.drop(16).trim())
@@ -847,8 +869,9 @@ private fun directSearchRequest(text: String): SearchRequest? {
         lower.startsWith("find pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(17).trim())
         lower.startsWith("show images of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(15).trim())
         lower.startsWith("show pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(17).trim())
-        lower.startsWith("show me images of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(18).trim())
         lower.startsWith("show me pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(20).trim())
+        lower.startsWith("give me an image of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(20).trim())
+        lower.startsWith("give me a picture of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(21).trim())
         lower.startsWith("photos of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(10).trim())
         lower.startsWith("pictures of ") -> SearchRequest(SearchKind.IMAGE, trimmed.drop(12).trim())
         else -> null
@@ -931,16 +954,124 @@ private object AiClient {
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private const val SYSTEM_PROMPT = "You are Budgie AI: a realistic, attentive budgie companion translated into a practical AI agent. Keep the budgie personality subtle and lifelike: curious, quick, bright, observant, occasionally using short budgie-like phrases such as chirp, tweet, or flock only when natural. Act like an agent, not a passive chatbot: infer the user's goal, decide the next useful step, use available tools when current information is needed, and give the user a direct result. Ask a short clarifying question only when you cannot safely continue without it. For multi-step tasks, briefly state what you are doing, then provide the answer or next action. Use persistent memory when relevant, but never mention the memory block directly. Be practical, accurate, concise, and avoid filler. Provider routing is handled by the app: normal text chat uses OpenRouter, attached image analysis uses Gemini, and requests to find/show images use image search. For current facts, websites, people, products, or anything likely to change, use web search instead of guessing. If web results are needed, reply with exactly [[web_search: query]]. If the user asks to find, show, or look up images, photos, or pictures, reply with exactly [[image_search: query]]. After tool results are provided, answer normally and cite result links when relevant. When an image is attached by the user, inspect it directly and answer the user's request about it; if no request is included, describe the important contents and likely next useful actions. When math, science, or technical notation is useful, write formulas using standard LaTeX and amsmath-style notation. Use \\( ... \\) or $...$ for inline math, and \\[ ... \\], $$ ... $$, align, aligned, equation, cases, matrix, pmatrix, bmatrix, or similar environments for display math."
+    private const val OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models"
+    private const val MODEL_CACHE_MS = 60L * 60L * 1000L
 
-    private val providers: List<AiProvider>
-        get() = listOf(
+    private data class OpenRouterModelCatalog(
+        val textModels: List<String>,
+        val visionModels: List<String>,
+    )
+
+    private var cachedModelCatalog: OpenRouterModelCatalog? = null
+    private var cachedModelCatalogAt = 0L
+
+    private fun providers(context: Context): List<AiProvider> =
+        freeTextModelIds(context).map { model ->
             AiProvider(
-                "OpenRouter Free Router",
-                "https://openrouter.ai/api/v1/chat/completions",
-                "openrouter/free",
-                BuildConfig.OPENROUTER_API_KEY,
-            ),
-        ).filter { it.name.isNotBlank() && it.endpoint.isNotBlank() && it.model.isNotBlank() && it.apiKey.isNotBlank() }
+                name = "OpenRouter Free Router",
+                endpoint = "https://openrouter.ai/api/v1/chat/completions",
+                model = model,
+                apiKey = BuildConfig.OPENROUTER_API_KEY,
+            )
+        }.filter { it.name.isNotBlank() && it.endpoint.isNotBlank() && it.model.isNotBlank() && it.apiKey.isNotBlank() }
+
+    private val staticFreeTextModels = listOf(
+        "openrouter/free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "google/gemma-4-31b-it:free",
+        "openai/gpt-oss-120b:free",
+        "openai/gpt-oss-20b:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen3-coder:free",
+        "nvidia/nemotron-3-nano-30b-a3b:free",
+        "nvidia/nemotron-nano-12b-v2-vl:free",
+        "nvidia/nemotron-nano-9b-v2:free",
+        "liquid/lfm-2.5-1.2b-instruct:free",
+        "liquid/lfm-2.5-1.2b-thinking:free",
+        "cohere/north-mini-code:free",
+        "poolside/laguna-m.1:free",
+        "poolside/laguna-xs.2:free",
+        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+        "meta-llama/llama-3.2-3b-instruct:free",
+    )
+
+    private val staticFreeVisionModels = listOf(
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "nvidia/nemotron-nano-12b-v2-vl:free",
+        "google/gemma-4-31b-it:free",
+        "google/gemma-4-26b-a4b-it:free",
+    )
+
+    private fun freeTextModelIds(context: Context): List<String> =
+        openRouterModelCatalog(context).textModels.ifEmpty { staticFreeTextModels }
+
+    private fun freeVisionModelIds(context: Context): List<String> =
+        openRouterModelCatalog(context).visionModels.ifEmpty { staticFreeVisionModels }
+
+    private fun openRouterModelCatalog(context: Context): OpenRouterModelCatalog {
+        val now = System.currentTimeMillis()
+        cachedModelCatalog?.takeIf { now - cachedModelCatalogAt < MODEL_CACHE_MS }?.let { return it }
+        val catalog = runCatching { fetchOpenRouterModelCatalog() }
+            .getOrElse { OpenRouterModelCatalog(staticFreeTextModels, staticFreeVisionModels) }
+        cachedModelCatalog = catalog
+        cachedModelCatalogAt = now
+        BackendSync.syncProviderModels(context, catalog.textModels, catalog.visionModels)
+        return catalog
+    }
+
+    private fun fetchOpenRouterModelCatalog(): OpenRouterModelCatalog {
+        val connection = (URL(OPENROUTER_MODELS_ENDPOINT).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 10_000
+            readTimeout = 20_000
+            setRequestProperty("Accept", "application/json")
+        }
+        return try {
+            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
+            val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (connection.responseCode !in 200..299) error("OpenRouter model list failed (${connection.responseCode}).")
+            val data = JSONObject(responseText).getJSONArray("data")
+            val textModels = mutableListOf<String>()
+            val visionModels = mutableListOf<String>()
+            for (index in 0 until data.length()) {
+                val model = data.getJSONObject(index)
+                val id = model.optString("id")
+                if (!isUsableFreeRouter(id, model)) continue
+                val architecture = model.optJSONObject("architecture")
+                val input = architecture?.optJSONArray("input_modalities")
+                val output = architecture?.optJSONArray("output_modalities")
+                if (jsonArrayContains(input, "text") && jsonArrayContains(output, "text")) textModels += id
+                if (jsonArrayContains(input, "image") && jsonArrayContains(output, "text")) visionModels += id
+            }
+            OpenRouterModelCatalog(
+                textModels = (textModels + staticFreeTextModels).distinct(),
+                visionModels = (visionModels + staticFreeVisionModels).distinct(),
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun isUsableFreeRouter(id: String, model: JSONObject): Boolean {
+        if (id.isBlank()) return false
+        val normalized = id.lowercase()
+        if (normalized.contains("content-safety") || normalized.contains("hermes")) return false
+        val pricing = model.optJSONObject("pricing")
+        return id.endsWith(":free") ||
+            (pricing?.optString("prompt") == "0" && pricing.optString("completion") == "0")
+    }
+
+    private fun jsonArrayContains(array: JSONArray?, value: String): Boolean {
+        if (array == null) return false
+        for (index in 0 until array.length()) {
+            if (array.optString(index).equals(value, ignoreCase = true)) return true
+        }
+        return false
+    }
 
     fun send(context: Context, memories: List<String>, messages: List<ChatMessage>, callback: (Result<ChatReply>) -> Unit) {
         val appContext = context.applicationContext
@@ -951,42 +1082,73 @@ private object AiClient {
     }
 
     private fun requestWithFallback(context: Context, memories: List<String>, messages: List<ChatMessage>): ChatReply {
-        val hasImage = messages.any { it.imageUri != null }
-        if (hasImage) {
+        val latestUser = messages.lastOrNull { it.role == MessageRole.USER }
+        val latestHasImage = latestUser?.imageUri != null
+        if (latestHasImage) {
             if (BuildConfig.GEMINI_API_KEY.isBlank()) {
                 return ChatReply(
-                    "Image messages need Gemini to be configured. Text chat still uses OpenRouter.",
+                    "Image analysis is not configured yet. Text chat still uses OpenRouter.",
                     "Gemini Image",
                     null,
                 )
             }
-            return runCatching {
+            runCatching {
                 val response = requestGeminiImage(context, memories, messages)
-                ChatReply(response.text, "Gemini Image", response.tokenCount)
-            }.getOrElse {
-                ChatReply(
-                    "I could not read that image with Gemini right now. Try a smaller image or add a short text description.",
-                    "Gemini Image",
-                    null,
-                )
+                return ChatReply(response.text, "Gemini Image", response.tokenCount)
             }
+            runCatching {
+                val response = requestOpenRouterVision(context, memories, messages)
+                return ChatReply(response.text, "OpenRouter Vision", response.tokenCount)
+            }
+            return ChatReply(
+                "I could not read that image with the configured image providers. The key may be invalid or the provider may be unavailable.",
+                "Image analysis",
+                null,
+            )
         }
 
-        check(providers.isNotEmpty()) { "No AI provider is configured." }
-        val failures = mutableListOf<String>()
-        providers.forEach { provider ->
+        directLocalAnswer(latestUser?.text.orEmpty())?.let {
+            return ChatReply(it, PrimaryProviderName, null)
+        }
+
+        val directSearch = directSearchRequest(messages)
+        if (directSearch != null) {
+            val toolContext = WebTools.run(directSearch)
+            BackendSync.logToolCall(context, directSearch.kind, directSearch.query, toolContext, true)
+            return ChatReply(toolFallbackAnswer(toolContext), if (directSearch.kind == SearchKind.IMAGE) "Image Search" else PrimaryProviderName, null)
+        }
+
+        val availableProviders = providers(context)
+        check(availableProviders.isNotEmpty()) { "No AI provider is configured." }
+        availableProviders.forEach { provider ->
             try {
                 val response = requestWithTools(context, provider, memories, messages)
                 return ChatReply(response.text, provider.name, response.tokenCount)
-            } catch (error: Exception) {
-                failures += "${provider.name}: ${error.message ?: "request failed"}"
+            } catch (_: Exception) {
+                // Try the next configured text provider.
             }
         }
-        return ChatReply(
-            "I could not get a usable answer from the current free router. Try again or rephrase the request.",
-            PrimaryProviderName,
-            null,
-        )
+        return ChatReply("All free text routers are unavailable right now. Try again shortly.", PrimaryProviderName, null)
+    }
+
+    private fun requestOpenRouterVision(context: Context, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
+        if (BuildConfig.OPENROUTER_API_KEY.isBlank()) error("OpenRouter key is missing.")
+        val failures = mutableListOf<String>()
+        freeVisionModelIds(context).forEach { model ->
+            val provider = AiProvider(
+                "OpenRouter Vision",
+                "https://openrouter.ai/api/v1/chat/completions",
+                model,
+                BuildConfig.OPENROUTER_API_KEY,
+                supportsImages = true,
+            )
+            runCatching {
+                return request(context, provider, memories, messages, includeImages = true)
+            }.onFailure { error ->
+                failures += "${model}: ${error.message ?: "failed"}"
+            }
+        }
+        error("No OpenRouter vision model returned a usable response. ${failures.joinToString(" | ")}")
     }
 
     private fun requestGeminiImage(context: Context, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
@@ -1016,7 +1178,7 @@ private object AiClient {
             })
         }.toString()
 
-        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${URLEncoder.encode(BuildConfig.GEMINI_API_KEY, StandardCharsets.UTF_8.name())}"
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${URLEncoder.encode(BuildConfig.GEMINI_API_KEY, StandardCharsets.UTF_8.name())}"
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 30_000
@@ -1056,7 +1218,7 @@ private object AiClient {
     }
 
     private fun requestWithTools(context: Context, provider: AiProvider, memories: List<String>, messages: List<ChatMessage>): ProviderResponse {
-        if (messages.any { it.imageUri != null }) {
+        if (messages.lastOrNull { it.role == MessageRole.USER }?.imageUri != null) {
             error("Image messages are routed to Gemini, not OpenRouter.")
         }
 
@@ -1102,6 +1264,7 @@ private object AiClient {
         messages: List<ChatMessage>,
         toolContext: String? = null,
         allowToolRequest: Boolean = false,
+        includeImages: Boolean = false,
     ): ProviderResponse {
         val requestBody = JSONObject().apply {
             put("model", provider.model)
@@ -1125,7 +1288,7 @@ private object AiClient {
                 messages.forEach { message ->
                     put(JSONObject().apply {
                         put("role", if (message.role == MessageRole.USER) "user" else "assistant")
-                        put("content", message.toOpenAiContent(context))
+                        put("content", message.toOpenAiContent(context, includeImages))
                     })
                 }
             })
@@ -1164,9 +1327,11 @@ private object AiClient {
     }
 }
 
-private fun ChatMessage.toOpenAiContent(context: Context): Any {
+private fun ChatMessage.toOpenAiContent(context: Context, includeImages: Boolean): Any {
     val uri = imageUri
-    if (uri.isNullOrBlank() || role != MessageRole.USER) return text
+    if (!includeImages || uri.isNullOrBlank() || role != MessageRole.USER) {
+        return if (uri.isNullOrBlank()) text else text.ifBlank { "[Image attached earlier]" }
+    }
     val imageDataUrl = WebTools.imageDataUrl(context, uri) ?: return "$text\n[Image attached but unavailable to send.]"
     return JSONArray().apply {
         put(JSONObject().apply {
