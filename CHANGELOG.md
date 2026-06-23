@@ -1,38 +1,34 @@
 # Changelog
 
-## 0.1.0-beta
+## 0.1.1-beta
 
 ### Release
 
-- Moved Budgie AI from alpha builds into beta.
-- Updated Android version name to `0.1.0-beta`.
-- Updated release label to `v1.5`.
-
-### Branding
-
-- Renamed project branding fully to Budgie AI.
-- Renamed the Android application ID to `com.budgieai.app`.
-- Renamed the Kotlin package to `com.budgieai.app`.
-- Renamed the internal Compose theme to Budgie.
-- Updated Firebase configuration for the Budgie AI package.
+- Updated Android version name to `0.1.1-beta`.
+- Updated release label to `v1`.
+- Kept Android version code unchanged.
 
 ### AI Routing
 
+- Added live OpenRouter free-model discovery from the current `/models` catalog.
+- Added hourly in-app caching for discovered free text and vision routers.
+- Added free OpenRouter text model failover for normal chat.
+- Added free OpenRouter vision model failover for attached-image analysis when Gemini is unavailable.
 - Kept normal text chat on OpenRouter.
-- Routed attached image analysis to Gemini.
-- Routed user requests for images, photos, or pictures to image search.
-- Made provider routing explicit in the agent instructions.
+- Kept attached image analysis on Gemini first, then OpenRouter vision fallback.
+- Kept user image requests routed through image search.
 
-### Agent Behavior
+### Database
 
-- Made Budgie AI behave more like an agent instead of a passive chatbot.
-- Updated the system prompt so the AI infers the user's goal and chooses the next useful step.
-- Improved current-information behavior so the AI is instructed to use web search instead of guessing.
-- Improved image-message behavior so attached images are inspected directly.
-- Reduced unnecessary clarification questions by asking only when blocked.
+- Added the `provider_models` table to the Budgie AI database.
+- Added the `20260623_provider_models` schema migration record.
+- Added the `sync_provider_models` backend sync action.
+- Seeded the live database with the current OpenRouter free router catalog.
+- Verified the backend health endpoint reports `12` live tables.
 
 ### Fixes
 
-- Fixed OpenRouter being treated as image-capable for attached-image analysis.
-- Fixed image requests and attached-image analysis sharing the same route.
-- Fixed raw search-tool directives being able to leak after a tool retry.
+- Fixed router lists becoming stale by using OpenRouter's live model catalog with a local fallback list.
+- Fixed normal chat giving up after only one free OpenRouter route failed.
+- Fixed old image attachments forcing later text messages through image-analysis routing.
+- Fixed attached-image fallback so image-capable OpenRouter routes can be tried after Gemini.
